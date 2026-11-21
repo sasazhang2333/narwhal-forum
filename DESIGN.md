@@ -320,3 +320,56 @@ CLI、MCP（正文 + `structuredContent.error.blockers`）、`--json` 三个出�
 顺带确认的两个后端事实（都已写进 README §8.0 的矩阵）：
 - **管理员发帖也进待审**（`status=-1`），不是特权豁免；要公开仍得 `approve_post`；
 - 普通用户写内容要过「绑手机 → 实名」两道门，而这两道门对管理员豁免（`src/main/java/com/tusksynx/bbs/web/api/BbsPostApiController.java` 的 `isRealNameVerified` 只在非 admin 路径检查）。
+
+## 17. 授权：为什么是「范围闸 + 设备码」两层
+
+### 17.1 问题：网页登录把「你是谁」和「它被允许做什么」压成了一步
+
+第一版的 `login` 是「真浏览器 + 读 localStorage」：人登录 → token 被读走 → 全能力。它解决了
+「密码不进模型」，但留下一个洞：**人从头到尾没有对「这个工具能做什么」表态过**。授权页上的那句
+「允许」，本来应该在这里。
+
+### 17.2 第一层：客户端范围闸（`src/consent.js`）
+
+7 个范围（`read` / `read:own` / `write:comment` / `write:post` / `moderate` / `delete` / `draft`），
+每个工具映射到一个；凭据文件里记 `grantedScopes`。越界在**本地**拒，请求根本不发。
+
+设计取舍：
+
+| 选择 | 理由 |
+| --- | --- |
+| 闸放在工具分发处（`cli.js` 的 `runTool`、`mcp/server.js` 的 `tools/call`） | 两处是唯一出口；放在各 handler 里迟早漏一个 |
+| 旧凭据按全量兼容 | 升级不该让用户重新登录；`status` 里标注「旧凭据」提醒扩权 |
+| 不做 per-call 临时提权 | 那等于每次弹窗，用户会条件反射点「同意」，闸就失去意义 |
+
+**它挡不住什么**：凭据文件是明文的 JWT，谁拿到文件都能直接打后端。所以这一层是「防手滑」不是
+「防越权」——真正的边界在后端鉴权与 token 收窄（见 17.4 的未完成项）。这一点写在代码与 README 里，
+不装作它是安全边界。
+
+### 17.3 第二层：设备码（后端 `/api/cli/device/*`）
+
+```
+工具  POST /api/cli/device/code    → { deviceCode, userCode, verificationUri, expiresIn }
+人    GET  /cli/authorize?code=…   → 看到调用方与申请范围 → 允许 / 拒绝
+工具  GET  /api/cli/device/poll    → approved 的一次性领走 access/refresh token
+```
+
+| 决策 | 理由 |
+| --- | --- |
+| 设备码存内存（`CliDeviceCodeService`），不建表 | 只活 10 分钟，没有持久化需求；建表要写 Liquibase 迁移并与生产对齐，不划算。**代价**：多实例部署会查不到 → 换 Redis 实现只需改 4 个方法 |
+| `deviceCode` 32 字节随机，`userCode` 8 位去易混字符（`XXXX-XXXX`） | 前者是持有证明（不给人看），后者要能念/抄；去掉 0/O/1/I/L 才不会被抄错 |
+| 令牌只发一次（`consume`） | deviceCode 事后泄露也换不到第二份 |
+| 用户码索引归一化（去横杠、大写） | 人抄码时不会照抄横杠 —— 实测第一次就栽在这里：`/info` 查 `R6DX-T5N6` 返回 null，因为索引存的是带横杠的原形 |
+| `scopes` 只是**给人看**的意图声明 | 真权限仍由各接口判；不因为声明了 moderate 就获得审核权 |
+| 不用标准 OAuth2 authorize 端点 | 那要求站点做 client 注册、consent 管理、redirect 白名单；设备码三个接口就够，且天然适配 CLI/Agent |
+
+**边界**：这一层强制的是「一次人工确认 + 一张有时效的令牌」，不强制「服务端 token 只能读」。
+要做后者，得给 token 加 scope claim 并在 `SecurityConfig` 里按路径校验 —— 那是另一个改动，
+暂列在 §11 待确认（此前的硬约束是「不修改 narwhal-cms」，用户已明确放开，但服务端 scope 校验
+需要先定「哪些接口属于哪个 scope」，属于接口清单级的工作）。
+
+### 17.4 被否掉的两种做法
+
+1. **每次写操作都重新弹一次授权**：用户会条件反射点同意，闸退化成装饰。
+2. **只做浏览器 profile 隔离，不做范围闸**：人仍然没对能力表过态；一旦 token 落到 Agent 上下文，
+   它可以把「只读」用在任何地方。

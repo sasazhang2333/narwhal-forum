@@ -16,6 +16,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { spawn } from 'node:child_process';
 import { configDir, patchCredentials, clearCredentials, readCredentials } from './config.js';
+import { unwrapEnvelope } from './client.js';
 
 /** 浏览器候选路径（macOS 绝对路径 + *nix PATH 命令名）。 */
 export const BROWSER_CANDIDATES = {
@@ -410,6 +411,131 @@ export function applyTokens(client, tokens) {
   if (tokens.accessToken) client.token = tokens.accessToken;
   if (tokens.refreshToken) client.refreshToken = tokens.refreshToken;
   return client;
+}
+
+
+/**
+ * 设备码授权（后端 /api/cli/device/*，见 narwhal-cms CliDeviceAuthApiController）。
+ *
+ * 与 browserLogin 的区别：这里**人在自己的浏览器里**打开授权页点「允许」，CLI 只拿到一个
+ * 8 位用户码。不需要起专用的浏览器 profile、不需要读 localStorage，也不要求本机能跑 Chrome
+ * —— 远程机器（SSH、容器、CI）只把 URL 和人码打印出来，人在自己电脑上确认即可。
+ *
+ * 流程：POST /code 拿码 → 人打开 URL 点允许 → GET /poll 直到 approved → 领走 token（只发一次）。
+ */
+export async function deviceLogin(opts = {}) {
+  const baseUrl = String(opts.baseUrl || '').replace(/\/+$/, '');
+  if (!baseUrl) throw new Error('deviceLogin 需要 baseUrl');
+  const log = opts.log || (() => {});
+  const clientName = opts.clientName || 'narwhal-forum';
+  const scopes = Array.isArray(opts.scopes) ? opts.scopes : ['all'];
+  const timeoutMs = opts.timeoutMs ?? 300000;
+  const intervalMs = opts.intervalMs ?? 2000;
+  const openBrowser = opts.openBrowser !== false;
+
+  const headers = { 'User-Agent': 'Mozilla/5.0 (narwhal-forum)', 'Content-Type': 'application/json' };
+
+  // 1. 申请设备码
+  const createRes = await fetch(baseUrl + '/api/cli/device/code', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ clientName, scopes }),
+    signal: AbortSignal.timeout(15000),
+  });
+  const createBody = await createRes.json().catch(() => null);
+  const created = unwrapEnvelope(createBody);
+  if (!created || !created.deviceCode) {
+    const err = new Error('申请设备码失败：' + describeBodyError(createRes, createBody));
+    err.hint = '确认 ' + baseUrl + ' 是可访问的论坛站点，且后端已包含 /api/cli/device 接口。';
+    throw err;
+  }
+
+  const verifyUrl = baseUrl + (created.verificationUri || '/cli/authorize?code=' + created.userCode);
+  log('请在浏览器里打开下面这个地址，登录后点「允许」：');
+  log('');
+  log('    ' + verifyUrl);
+  log('');
+  log('授权码：' + created.userCode + '（' + Math.round((created.expiresIn || 600) / 60) + ' 分钟内有效）');
+  log('等待你在网页上确认…（' + Math.round(timeoutMs / 1000) + ' 秒后放弃）');
+
+  if (openBrowser) {
+    const opened = openInBrowser(verifyUrl);
+    if (!opened) log('（没能自动打开浏览器，请手动复制上面的地址）');
+  }
+
+  // 2. 轮询
+  const deadline = Date.now() + timeoutMs;
+  let lastStatus = 'pending';
+  while (Date.now() < deadline) {
+    await delay(intervalMs);
+    let payload;
+    try {
+      const res = await fetch(baseUrl + '/api/cli/device/poll?deviceCode=' + encodeURIComponent(created.deviceCode), {
+        headers,
+        signal: AbortSignal.timeout(15000),
+      });
+      payload = unwrapEnvelope(await res.json().catch(() => null));
+    } catch (err) {
+      log('（轮询失败，重试：' + err.message + '）');
+      continue;
+    }
+    const status = String(payload && payload.status || '');
+    if (status === 'pending') {
+      if (lastStatus !== 'pending') log('状态：' + status);
+      continue;
+    }
+    if (status === 'approved' && payload.accessToken) {
+      return {
+        accessToken: payload.accessToken,
+        refreshToken: payload.refreshToken,
+        username: payload.username,
+        userId: payload.userId,
+        scopes: payload.scopes || scopes,
+        clientName: payload.clientName || clientName,
+        authMode: 'device',
+      };
+    }
+    if (status === 'denied') {
+      const err = new Error('授权被拒绝：网页上点了「拒绝」，没有发出任何令牌');
+      err.hint = '需要授权时重新运行 narwhal-forum login --device。';
+      throw err;
+    }
+    if (status === 'expired' || status === 'consumed') {
+      const err = new Error(status === 'expired' ? '设备码已过期（超过 10 分钟没人确认）' : '这个设备码已经被使用过了');
+      err.hint = '重新运行 narwhal-forum login --device 生成新的码。';
+      throw err;
+    }
+    lastStatus = status;
+  }
+
+  const err = new Error('等待授权超时（' + Math.round(timeoutMs / 1000) + ' 秒内没有人在网页上确认）');
+  err.hint = '重新运行 narwhal-forum login --device，或加 --timeout-sec 600 放宽等待时间。';
+  throw err;
+}
+
+/** 用系统默认浏览器打开 URL；打不开返回 false（远程/无桌面环境）。 */
+function openInBrowser(url) {
+  const attempts = process.platform === 'darwin'
+    ? [['open', [url]]]
+    : process.platform === 'win32'
+      ? [['cmd', ['/c', 'start', '', url]]]
+      : [['xdg-open', [url]]];
+  for (const [cmd, args] of attempts) {
+    try {
+      const child = spawn(cmd, args, { stdio: 'ignore', detached: true });
+      child.unref();
+      return true;
+    } catch {
+      // 继续尝试下一种
+    }
+  }
+  return false;
+}
+
+/** 把后端信封里的 message 提出来（设备码接口失败时是 200 + status:-1 的信封）。 */
+function describeBodyError(res, body) {
+  const message = body && typeof body === 'object' ? (body.message || body.exception) : '';
+  return 'HTTP ' + res.status + (message ? '（' + message + '）' : '');
 }
 
 export const _internal = { readPortFile, listTargets, connectCdp, makeEvaluator, closeTarget, stopChild, whichAll, isExecutable, delay };

@@ -110,6 +110,9 @@ export async function startMockForum(options = {}) {
     // 真实后端：新账号/未达信任阈值 → 发帖进待审（status=-1），要审核批准才公开
     autoApprove: true,
     lastCommentAt: 0,
+    // 设备码授权（/api/cli/device/*）：与真实后端 CliDeviceAuthApiController 同形状
+    deviceCodes: new Map(),   // deviceCode -> { deviceCode, userCode, clientName, scopes, status }
+    devicePollCount: new Map(),
     requests: [],
     uploads: [],
   };
@@ -179,9 +182,11 @@ export async function startMockForum(options = {}) {
   }
 
   const server = http.createServer(async (req, res) => {
+
     const url = new URL(req.url, 'http://' + (req.headers.host || '127.0.0.1'));
     const pathname = url.pathname;
     const method = req.method || 'GET';
+
     const rawBuf = await readRawBody(req);
     const body = rawBuf.toString('utf8');
     state.requests.push({ method, pathname, query: url.search });
@@ -191,6 +196,50 @@ export async function startMockForum(options = {}) {
       res.end(JSON.stringify(payload));
     };
     const unauth = () => send(401, { status: -1, message: 'unauthorized' });
+
+    // ——— 设备码授权（真实后端：CliDeviceAuthApiController）———
+    if (method === 'POST' && pathname === '/api/cli/device/code') {
+      // body 在进入路由分支前已被读走（rawBuf），这里不能再去读流 —— 否则等一个已结束的流会挂住
+      const payload = JSON.parse(body || '{}');
+      const deviceCode = crypto.randomBytes(16).toString('hex');
+      const userCode = 'TEST-CODE';
+      state.deviceCodes.set(deviceCode, {
+        deviceCode, userCode,
+        clientName: payload.clientName || 'unknown-client',
+        scopes: Array.isArray(payload.scopes) ? payload.scopes : [],
+        status: 'pending',
+      });
+      return send(200, envelope({
+        deviceCode, userCode,
+        verificationUri: '/cli/authorize?code=' + userCode,
+        expiresIn: 600, interval: 1, scopes: payload.scopes || [],
+      }));
+    }
+    if (method === 'GET' && pathname === '/api/cli/device/poll') {
+      const deviceCode = url.searchParams.get('deviceCode');
+      const entry = state.deviceCodes.get(deviceCode);
+      if (!entry) return send(200, failure('设备码不存在或已过期'));
+      if (entry.status === 'pending') {
+        const n = (state.devicePollCount.get(deviceCode) || 0) + 1;
+        state.devicePollCount.set(deviceCode, n);
+        // 第 2 次轮询之前由测试主动 approve
+        return send(200, envelope({ status: 'pending', userCode: entry.userCode, clientName: entry.clientName, scopes: entry.scopes, expiresIn: 600, interval: 1 }));
+      }
+      if (entry.status === 'approved') {
+        entry.status = 'consumed';
+        return send(200, envelope({
+          status: 'approved',
+          accessToken: ACCESS_TOKEN,
+          refreshToken: REFRESH_TOKEN,
+          username: 'admin',
+          userId: '1',
+          clientName: entry.clientName,
+          scopes: entry.scopes,
+          userCode: entry.userCode,
+        }));
+      }
+      return send(200, envelope({ status: entry.status, userCode: entry.userCode, clientName: entry.clientName, scopes: entry.scopes, expiresIn: 0, interval: 1 }));
+    }
 
     try {
       if (pathname === '/api/cms/auth/narwhal/code' && method === 'GET') {

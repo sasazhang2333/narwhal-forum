@@ -93,6 +93,8 @@ narwhal-forum whoami
 | `risk` | 授权前必读的风险提示；每次 `login`/`setup` 也会先打印 | 否 |
 | `login` | **网页授权登录**：打开独立浏览器窗口，人工登录后自动取 token（见 4.2） | 否 |
 | `login --password` | 退回账号密码登录（RSA+AES 加密传输） | 否 |
+| `login --device` | **设备码授权**：打印 URL + 8 位码，人在网页点「允许」后拿 token（远程/容器用，见 4.2.2） | 否 |
+| `scope [set …]` | 查看 / 修改授权范围（见 4.2.1） | 否 |
 | `logout` | **撤销授权**：后端登出 + 删本地凭据 + 删浏览器 profile | 否 |
 | `auth status` | 授权状态（是否登录、授权方式、profile 位置） | 否 |
 | `token set` / `show` / `clear` | 直接管理 token（适合从浏览器复制） | 否 |
@@ -195,6 +197,71 @@ $ narwhal-forum login
 **关于「安装时自动打开浏览器」**：npm 安装不应该在你背后弹窗，所以打开浏览器这一步放在
 `setup` / `login` 上。dsh 里装完插件后，第一次用论坛能力前跑一次 `narwhal-forum setup`；
 `mcp__narwhal-forum__login` 工具调用时也会打开浏览器（写操作失败提示「需要登录」时让 Agent 调它）。
+
+### 4.2.1 授权范围：先决定这个工具能做什么
+
+网页登录把「登录」和「授权」压成了一步：人登完，token 就被读走了，中间没有「允许它做什么」。
+`scope` 补上这一层 —— 授权时明确授予哪些能力，越界**在本地就拒**，请求根本不发出去。
+
+```bash
+narwhal-forum login                                  # 交互里确认范围（回车=全量，n=只读）
+narwhal-forum login --scope read,write:comment       # 管线里直接指定
+narwhal-forum scope                                  # 看已授权范围
+narwhal-forum scope set read                         # 收窄成只读，立刻生效
+```
+
+| 范围 id | 覆盖的能力 |
+| --- | --- |
+| `read` | 帖子列表 / 详情 / 评论 / 分类 / 栏目 / 搜索 |
+| `read:own` | `whoami`、我发过的评论 |
+| `write:comment` | 发评论、回复、点赞、上传图片 |
+| `write:post` | 发帖 |
+| `moderate` | 批准待审帖（`approve_post`） |
+| `delete` | 删自己的评论与帖子（仍需 `confirm=true`） |
+| `draft` | 人审草稿：`draft_create` / `draft_publish` … |
+
+越界时的输出（退出码 1，不发出请求）：
+
+```text
+✗ 当前授权不含「评论与互动」（write:comment）：已授权范围 = read。
+  👉 要扩权请重新授权：narwhal-forum login（或在 dsh 里调用 login 工具带 scopes）。只读内容不需要授权。
+```
+
+MCP 侧：`login` 工具带 `scopes` 参数（默认 `all`），`status` 里能看到当前范围。
+**边界要说清楚**：这是客户端自律的闸（token 本身仍是账号全权令牌），拦的是「Agent 顺手做了你没
+想到的事」，不是「谁拿到凭据文件后越权」—— 那只能靠后端鉴权与服务端 token 收窄，见 DESIGN §17。
+
+### 4.2.2 设备码授权：远程机器 / 容器 / 没有桌面
+
+`login`（浏览器模式）要求**本机能跑 Chrome**。在 SSH、容器、CI 里换成设备码：
+
+```bash
+$ narwhal-forum login --device
+请在浏览器里打开下面这个地址，登录后点「允许」：
+
+    http://127.0.0.1:8080/cli/authorize?code=R6DX-T5N6
+
+授权码：R6DX-T5N6（10 分钟内有效）
+等待你在网页上确认…（300 秒后放弃）
+授权成功（设备码）
+  账号: admin
+  凭据已写入 ~/.config/narwhal-forum/credentials.json（0600，已含 refresh token）
+  授权范围: 全部（7 项）
+```
+
+| 步骤 | 谁做 | 说明 |
+| --- | --- | --- |
+| 1. 申请设备码 | CLI | `POST /api/cli/device/code` → 拿到 `deviceCode`（工具持有）与 `userCode`（给人看） |
+| 2. 点「允许」 | 你，在**任何**已登录的浏览器里 | 打开 `/cli/authorize?code=…`，页面显示调用方与申请范围 → 允许 / 拒绝 |
+| 3. 换令牌 | CLI 轮询 | `GET /api/cli/device/poll` → `approved` 时一次性领走 access/refresh token |
+
+| 要点 | 说明 |
+| --- | --- |
+| 令牌只发一次 | 领走后设备码立即置 `consumed`，同一个码泄露也换不到第二份 |
+| 10 分钟过期 | 没人确认就作废，不用管清理 |
+| 不需要本机浏览器 | 地址和授权码打印出来，人在自己电脑上打开就行（`--browser false` 可关掉自动拉起） |
+| 后端要求 | narwhal-cms 需包含 `/api/cli/device/*`（`CliDeviceAuthApiController`）；没有这个接口时 `--device` 会提示 |
+| 撤销 | 和其它模式一样：`narwhal-forum logout` |
 
 ---
 
@@ -396,7 +463,7 @@ NARWHAL_FORUM_BASE_URL = "http://127.0.0.1:8080"
 | 工具 | 作用 | 主要参数 | 只读 | 需登录 |
 | --- | --- | --- | --- | --- |
 | `status` | 配置与登录状态 | — | ✅ | 否 |
-| `login` | 网页授权登录（默认）/ 账号密码 | `mode` `timeoutSec` `browserPath` `username?` `password?` `captchaToken?` | ❌ | 否 |
+| `login` | 网页授权登录（默认）/ 设备码 / 账号密码 | `mode` `scopes` `timeoutSec` `browserPath` `username?` `password?` `captchaToken?` | ❌ | 否 |
 | `logout` | 撤销授权（后端登出 + 删凭据 + 删 profile） | `keepBrowser?` | ❌ | 否 |
 | `whoami` | 当前用户 | — | ✅ | 是 |
 | `list_posts` | 帖子列表 | `page` `pageSize` `categoryId` `userId` `titleLike` `order` | ✅ | 否 |

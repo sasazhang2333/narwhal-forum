@@ -309,6 +309,35 @@ async function cmdLogin(flags) {
     return 0;
   }
 
+  // 设备码授权：人在自己的浏览器里点「允许」，CLI 只拿 8 位用户码 —— 远程/容器里也能用
+  if (flags.device === true || flags.mode === 'device') {
+    const { deviceLogin } = await import('./auth.js');
+    const r = await deviceLogin({
+      baseUrl: client.baseUrl,
+      clientName: 'narwhal-forum@' + VERSION,
+      scopes,
+      timeoutMs: seconds(flags, 300000),
+      openBrowser: flags.browser !== false,
+      log: (line) => process.stderr.write(line ? line + '\n' : '\n'),
+    });
+    const saved = patchCredentials({
+      accessToken: r.accessToken,
+      refreshToken: r.refreshToken,
+      authMode: 'device',
+      grantedScopes: scopes,
+      scopesGrantedAt: new Date().toISOString(),
+      loggedInAt: new Date().toISOString(),
+    });
+    process.stdout.write((flags.json
+      ? JSON.stringify({ authenticated: true, authMode: 'device', baseUrl: client.baseUrl, credentialsPath: saved.path, username: r.username, grantedScopes: scopes }, null, 2)
+      : ['授权成功（设备码）',
+        '  账号: ' + (r.username || '(未知)'),
+        '  凭据已写入 ' + saved.path + '（0600，已含 refresh token）',
+        '  授权范围: ' + scopeSummary(scopes),
+        '  撤销方式: narwhal-forum logout'].join('\n')) + '\n');
+    return 0;
+  }
+
   const { browserLogin } = await import('./auth.js');
   const r = await browserLogin({
     baseUrl: client.baseUrl,
