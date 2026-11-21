@@ -191,8 +191,8 @@ created → pending_review → approved │ rejected
 
 ## 11. 待确认
 
-1. GitHub 私有仓库的最终名字与账号（暂按 `sasazhang2333/narwhal-forum`）。
-2. 是否发布到 npm（公开 or 私有 registry）；不发布时 dsh 用本地 patch 变体。
+1. ~~GitHub 私有仓库的最终名字与账号~~ —— 已定：`sasazhang2333/narwhal-forum`（private，main 分支，37 个文件）。
+2. 是否发布到 npm（公开 or 私有 registry）；不发布时 dsh 用本地 patch 变体（当前即此形态：profile 里是 `link:` 本地依赖）。
 3. 论坛是否在登录时启用验证码 / 双因素 —— 启用时 CLI 登录会返回结构化错误码，需改用 token 导入。
 
 ## 12. 图片评论：为什么零后端改动（A 方案）
