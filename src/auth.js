@@ -450,7 +450,10 @@ export async function deviceLogin(opts = {}) {
     throw err;
   }
 
-  const verifyUrl = baseUrl + (created.verificationUri || '/cli/authorize?code=' + created.userCode);
+  // 打印给人打开的那个 URL：API 主机与 Web 前端可能不同源（本地开发就是 8080 后端 + 3000 前端），
+  // 所以允许单独指定 webBaseUrl；不指定就沿用 baseUrl（线上一般是同源）。
+  const webBase = String(opts.webBaseUrl || baseUrl).replace(/\/+$/, '');
+  const verifyUrl = webBase + (created.verificationUri || '/cli/authorize?code=' + created.userCode);
   log('请在浏览器里打开下面这个地址，登录后点「允许」：');
   log('');
   log('    ' + verifyUrl);

@@ -269,7 +269,7 @@ test('批准路径：假 TTY + 输入 yes → 草稿变 approved 且 token 真�
 });
 
 test('批准路径：输入不是 yes → 取消，状态不变，不发 token', async () => {
-  const rec = newCommentDraft('[REDACTED_STREET_373]');
+  const rec = newCommentDraft('这是一条带图片的评论');
   const lines = [];
   const code = await approveDraftInteractive(rec.id, {
     isTTY: true,

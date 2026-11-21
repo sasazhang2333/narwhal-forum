@@ -182,7 +182,7 @@ created → pending_review → approved │ rejected
 
 | 能力 | 状态 | 说明 |
 | --- | --- | --- |
-| 图片上传 / 图片评论 | **已实现** | 复用后端已有的 `POST /api/upload/image-upload`，正文内联 markdown；[REDACTED_STREET_413] |
+| 图片上传 / 图片评论 | **已实现** | 复用后端已有的 `POST /api/upload/image-upload`，正文内联 markdown；外链失效或被拦不会静默成功 |
 | 非图片附件 | 未实现 | 后端上传接口按 `image` 分发，附件还涉存储配置与下载鉴权 |
 | 帖子审核（待审列表 / 批准 / 驳回） | **部分实现** | `approve_post` 已上（`PUT /api/bbs/post/{id}/approve`）；待审队列列表与驳回（`/reject`）未接，需先确认后端审核态机 |
 | 通知 / 私信 | 未实现 | 后端接口存在，但需确认权限与隐私边界 |

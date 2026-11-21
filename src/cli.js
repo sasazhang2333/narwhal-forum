@@ -25,9 +25,11 @@ const HELP = [
   '用法: narwhal-forum <command> [options]',
   '',
   '连接与身份:',
-  '  status                 查看后端地址[REDACTED_ADDR_8]',
+  '  status                 查看后端地址（--base-url 或环境变量 NARWHAL_FORUM_BASE_URL）',
   '  setup                  首次接入：检查后端 → 打开浏览器授权 → 打印下一步',
-  '  login                  网页授权登录（打开浏览器，登录一次即可）；--password 走账号密码',
+  '  login                  网页授权登录（打开浏览器，登录一次即可）；--password 走账号密码；',
+  '                         --device 走设备码（打印一个链接，人在自己浏览器里点「允许」）',
+  '                         --web-url <前端站点地址>（后端与前端不同源时用，本地开发常见）',
   '  logout                 撤销授权：后端登出 + 删除本地凭据 + 删除插件浏览器 profile',
   '  auth status            查看授权状态（是否登录、授权方式、浏览器 profile 位置）',
   '  risk                   授权前必读的风险提示（每次 login/setup 也会先打印）',
@@ -61,14 +63,14 @@ const HELP = [
   '  tools [--json]         列出全部能力及其参数 schema',
   '  call <tool> --json <p> 直接调用任意能力（逃生舱，参数为 JSON）',
   '',
-  '全局选项: --base-url --token --refresh-token --timeout --json --debug --help --version',
+  '全局选项: --base-url --web-url --token --refresh-token --timeout --json --debug --help --version',
   '登录相关: --password --username --browser <路径> --timeout-sec <秒> --keep-browser --yes --scope <列表>',
   '',
-  '环境变量: NARWHAL_FORUM_BASE_URL, NARWHAL_FORUM_TOKEN, NARWHAL_FORUM_REFRESH_TOKEN,',
+  '环境变量: NARWHAL_FORUM_BASE_URL, NARWHAL_FORUM_WEB_URL, NARWHAL_FORUM_TOKEN, NARWHAL_FORUM_REFRESH_TOKEN,',
   '          NARWHAL_FORUM_USERNAME, NARWHAL_FORUM_PASSWORD, NARWHAL_FORUM_HOME',
 ].join('\n');
 
-const GLOBAL_FLAGS = new Set(['base-url', 'token', 'refresh-token', 'username', 'password', 'timeout', 'json', 'debug', 'help', 'version', 'verbose', 'browser', 'timeout-sec', 'keep-browser', 'mode', 'yes', 'accept-risk']);
+const GLOBAL_FLAGS = new Set(['base-url', 'token', 'refresh-token', 'username', 'password', 'timeout', 'json', 'debug', 'help', 'version', 'verbose', 'browser', 'timeout-sec', 'keep-browser', 'mode', 'yes', 'accept-risk', 'web-url']);
 
 /** 可重复出现的选项：--image a.png --image b.png → 数组。 */
 const MULTI_FLAGS = new Set(['image', 'images']);
@@ -314,6 +316,7 @@ async function cmdLogin(flags) {
     const { deviceLogin } = await import('./auth.js');
     const r = await deviceLogin({
       baseUrl: client.baseUrl,
+      webBaseUrl: flags['web-url'] || process.env.NARWHAL_FORUM_WEB_URL || '',
       clientName: 'narwhal-forum@' + VERSION,
       scopes,
       timeoutMs: seconds(flags, 300000),

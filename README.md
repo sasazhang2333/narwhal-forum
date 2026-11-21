@@ -259,6 +259,7 @@ $ narwhal-forum login --device
 | --- | --- |
 | 令牌只发一次 | 领走后设备码立即置 `consumed`，同一个码泄露也换不到第二份 |
 | 10 分钟过期 | 没人确认就作废，不用管清理 |
+| 前后端不同源时 | 本地开发常见「API 在一个端口、页面在另一个端口」，此时加 `--web-url <前端地址>`（或环境变量 `NARWHAL_FORUM_WEB_URL`），否则打印出来的链接指向 API 主机 —— 打开就是 404 |
 | 不需要本机浏览器 | 地址和授权码打印出来，人在自己电脑上打开就行（`--browser false` 可关掉自动拉起） |
 | 后端要求 | narwhal-cms 需包含 `/api/cli/device/*`（`CliDeviceAuthApiController`）；没有这个接口时 `--device` 会提示 |
 | 撤销 | 和其它模式一样：`narwhal-forum logout` |
@@ -349,7 +350,7 @@ narwhal-forum setup
 | `npm i -g --prefix ~/.local .`（默认配置） | `narwhal-forum` / `[mcp]` |
 | 已发布到 npm，想用 npx | `npx` / `[-y, narwhal-forum, mcp]` |
 | 不装全局，源码直跑 | `node` / `[<包目录>/bin/narwhal-forum.js, mcp]`（见 `examples/cordis.local.patch.yml`） |
-| **dsh 桌面端（app）** | 见下面 5.1：桌面进程的 PATH 里没有 node，必须 [REDACTED_STREET_411] |
+| **dsh 桌面端（app）** | 见下面 5.1：桌面进程的 PATH 里没有 node，必须用启动器脚本包一层 |
 
 ### 5.1 dsh 桌面端：PATH 里没有 node（必读）
 
@@ -362,7 +363,7 @@ ps eww -p $(pgrep -f 'DeepSeek Harness' | head -1) | tr ' ' '\n' | grep '^PATH='
 ```
 
 于是 `command: narwhal-forum`、`npx`、甚至 `node`（nvm 装的）**全都解析不到**。
-而 `failOnStartupError: false` 会让这种失败**静默发生**：[REDACTED_STREET_412]，看起来像「插件没装」。
+而 `failOnStartupError: false` 会让这种失败**静默发生**：工具列表少了一截，看起来像「插件没装」。
 
 解法：给它一个绝对路径的启动器（一个 20 行的 sh 脚本，自己找 node，与 nvm 版本解耦）。
 
