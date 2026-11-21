@@ -34,6 +34,7 @@
   "scripts": {
     "test": "node --test \"test/*.test.js\"",
     "test:mcp": "node test/mcp.test.js",
+    "test:e2e": "node scripts/e2e-mcp.mjs",
     "mcp:inspect": "node test/mcp-inspect.js",
     "mcp": "node bin/narwhal-forum.js mcp"
   },

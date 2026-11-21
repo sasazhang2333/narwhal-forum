@@ -409,7 +409,15 @@ NARWHAL_FORUM_BASE_URL = "http://127.0.0.1:8080"
 
 - **已支持**：图片（评论/发帖内联，见 4.4）。
 - **未实现**：非图片附件、通知、私信、收藏与关注列表（后端有接口但未纳入本包；`call` 逃生舱可临时补位）。
-- **验证边界**：93 个用例跑在进程内 mock 后端（同一套契约）；真实论坛的端到端验证需要 narwhal-cms 后端在 `8080` 运行。浏览器授权把「开浏览器 + 取 token」抽成可注入的取值函数来测，真实弹窗需要人工验证一次。
+- **验证边界**（三层，已跑过的都标了）：
+  1. **单元/集成**：93 个用例跑在进程内 mock 后端（同一套契约）。
+  2. **MCP 端到端**：`npm run test:e2e`（`scripts/e2e-mcp.mjs`）用 dsh 桌面端**实际会 spawn 的那条命令**、在
+     `PATH=/usr/bin:/bin:/usr/sbin:/sbin`（没有 node / npx）的干净环境里走完
+     initialize → tools/list（20 个）→ `list_posts` → `upload_image` → `create_comment` 带图，并校验 mock 里
+     落库的正文确实是 `![](http://…)`。10/10 通过 —— 这一层证明「桌面端 PATH 里没有 node」不再是阻塞。
+  3. **真实论坛**：未完成。需要 narwhal-cms 后端在 `8080` 运行且手上有论坛账号；本轮尝试起后端时
+     数据库口令不在本机会话可见范围内（`.env` 属敏感路径，读取被策略拦下），因此没有伪造或猜测凭据。
+- 浏览器授权把「开浏览器 + 取 token」抽成可注入的取值函数来测，真实弹窗需要人工验证一次。
 - **待确认**：GitHub 私有仓库名与归属账号、是否发布到 npm 私有源。
 - 论坛若开启验证码 / 双因素登录：**网页授权天然通过**（人就在真浏览器里）；只有 `login --password` 会返回 `CAPTCHA_REQUIRED` / `TWO_FACTOR_REQUIRED`。
 - 浏览器授权依赖 Chromium 系浏览器（Chrome / Edge / Brave / Chromium）；Safari / Firefox 不支持，需 `--password` 或 `token set`。
@@ -435,15 +443,17 @@ narwhal-forum/
 ├── cordis.patch.yml         # dsh 插件接线
 ├── locale/{en,zh}.json      # dsh 插件文案
 ├── icon.svg
-├── examples/                # Claude Code / Codex / 本地 dsh patch 示例
+├── examples/                # Claude Code / Codex / dsh 启动器 / profile 覆写示例
+├── scripts/e2e-mcp.mjs      # 端到端：按桌面端真实命令跑一遍 MCP（10 项断言）
 └── test/                    # mock 论坛 + 93 个用例（含 multipart 上传端点）
 ```
 
 ## 10. 开发
 
 ```bash
-npm test         # 等价于 node --test "test/*.test.js"（93 个用例）
-npm run mcp      # 本地起 MCP server
+npm test          # 等价于 node --test "test/*.test.js"（93 个用例）
+npm run test:e2e  # 端到端：用桌面端的启动器跑一遍 MCP（不需要真论坛，会自动起 mock）
+npm run mcp       # 本地起 MCP server
 ```
 
 ## License

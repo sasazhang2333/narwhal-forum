@@ -256,3 +256,19 @@ created → pending_review → approved │ rejected
 
 启动器（`examples/narwhal-forum-mcp`）在 nvm 各版本的 node 里挑一个可执行的，再 `exec` 包内 bin，
 所以 nvm 换版本不用改 patch。改完需重启 dsh 应用。
+
+## 14. 验证策略：为什么"用启动器再跑一遍"比单测更有说服力
+
+单测证明的是**逻辑**，但桌面端失败的那一类问题（PATH 里没有 node、启动器找不到包、stdio 握手帧格式）
+恰好都在进程边界上，单测一个都覆盖不到。所以 `scripts/e2e-mcp.mjs` 刻意复刻桌面端的**进程上下文**：
+
+- `env` 只留 `PATH=/usr/bin:/bin:/usr/sbin:/sbin` + `HOME` + 两个论坛变量 —— 没有 nvm、没有全局 bin；
+- spawn 的是 `~/.dsh/bin/narwhal-forum-mcp`（线上同一条命令），不是 `node bin/...`；
+- 走完整 JSON-RPC：`initialize` → `tools/list` → `list_posts` → `upload_image` → `create_comment`(带 `images`)，
+  最后回读 mock 的落库结果，确认正文是 `![](http://…)` 而不是"工具说成功了"。
+
+这条链一旦通过，剩下的变量只有"dsh 是否把这一行 patch 读进来"和"真论坛是否可达"，
+两者都可以独立检查（`cordis_inspect_query` / `curl`）。因此 CI 里也把它当冒烟测试用，不需要真论坛。
+
+**未完成的一环**：真实 narwhal-cms 后端。尝试启动时数据库口令不在可见范围内（`.env` 属敏感路径，
+被策略拦下），而猜测/伪造凭据是绝对不做的 —— 因此这一层保持"待用户提供账号后验证"。
