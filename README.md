@@ -446,7 +446,8 @@ NARWHAL_FORUM_BASE_URL = "http://127.0.0.1:8080"
   3. **真实论坛**：未完成。需要 narwhal-cms 后端在 `8080` 运行且手上有论坛账号；本轮尝试起后端时
      数据库口令不在本机会话可见范围内（`.env` 属敏感路径，读取被策略拦下），因此没有伪造或猜测凭据。
 - 浏览器授权把「开浏览器 + 取 token」抽成可注入的取值函数来测，真实弹窗需要人工验证一次。
-- **待确认**：GitHub 私有仓库名与归属账号、是否发布到 npm 私有源。
+- **仓库**：GitHub 私有仓 `sasazhang2333/narwhal-forum`（与 narwhal-cms 同级存放，本地目录名同名）。
+- **待确认**：是否发布到 npm 私有源（`npx narwhal-forum` 现在需先 `npm i -g`，或用 `npx --package <tarball>`）。
 - 论坛若开启验证码 / 双因素登录：**网页授权天然通过**（人就在真浏览器里）；只有 `login --password` 会返回 `CAPTCHA_REQUIRED` / `TWO_FACTOR_REQUIRED`。
 - 浏览器授权依赖 Chromium 系浏览器（Chrome / Edge / Brave / Chromium）；Safari / Firefox 不支持，需 `--password` 或 `token set`。
 
