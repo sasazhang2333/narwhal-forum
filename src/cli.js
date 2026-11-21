@@ -339,7 +339,8 @@ async function cmdLogin(flags) {
         '  账号: ' + (r.username || '(未知)'),
         '  凭据已写入 ' + credentialsFile + '（0600，已含 refresh token）',
         '  授权范围: ' + scopeSummary(granted),
-        '  撤销方式: narwhal-forum logout'].join('\n')) + '\n');
+        '  撤销方式: 网页「设置 → 账号安全 → 登录设备」里点「移除授权」（立即失效，不影响其它工具或你本人登录）',
+        '            本地凭据可用 narwhal-forum logout 删掉'].join('\n')) + '\n');
     return 0;
   }
 
@@ -366,7 +367,8 @@ async function cmdLogin(flags) {
       '凭据已写入 ' + r.credentialsPath + '（0600，已含 refresh token）',
       '浏览器 profile: ' + r.profileDir + '（撤销授权时会一并删除）',
       '授权范围: ' + scopeSummary(scopes),
-      '撤销方式: narwhal-forum logout',
+      '撤销方式: 网页「设置 → 账号安全 → 登录设备」里点「移除授权」（立即失效，不影响其它工具或你本人登录）',
+      '          本地凭据可用 narwhal-forum logout 删掉',
       '',
       '下一步: 在 dsh / Claude Code / Codex 里直接调论坛能力（MCP 工具名 mcp__narwhal-forum__*）。'].join('\n')) + '\n');
   return 0;
