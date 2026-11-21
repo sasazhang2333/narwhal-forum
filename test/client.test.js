@@ -251,3 +251,26 @@ test('refresh 被踢时重读磁盘凭据并重试一次（MCP 进程不必重�
     fs.rmSync(home, { recursive: true, force: true });
   }
 });
+
+// 1121：服务端能力闸的 403 不能被当成「登录过期」——那会把用户带去重新登录，而真正该做的是去设置页勾回来。
+test('403 + X-Cli-Scope-Denied → ForumError(E_SCOPE_DENIED)，不是 ForumAuthError', async () => {
+  const forum = await startMockForum();
+  try {
+    forum.state.scopeDenied = 'write:comment';
+    const client = new ForumClient({ baseUrl: forum.baseUrl, token: ACCESS_TOKEN });
+    await assert.rejects(
+      () => client.react({ postId: 1, emoji: '👍' }),
+      (err) => {
+        assert.ok(!(err instanceof ForumAuthError), '不能是 ForumAuthError');
+        assert.equal(err instanceof ForumError, true);
+        assert.equal(err.code, 'E_SCOPE_DENIED');
+        assert.equal(err.scope, 'write:comment');
+        assert.match(err.message, /授权不含/);
+        assert.match(err.hint, /设置 → 账号安全 → AI 工具授权/);
+        return true;
+      }
+    );
+  } finally {
+    await forum.close();
+  }
+});

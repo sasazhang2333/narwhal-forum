@@ -25,6 +25,17 @@ export const POST_ORDERS = {
   'on-this-day': '/api/bbs/post/on-this-day',
 };
 
+/** scope id → 人话（与 src/consent.js 的 SCOPES 同步；这里独立一份，避免 client ↔ consent 互相 import）。 */
+const SCOPE_TITLES = {
+  read: '读取公开内容',
+  'read:own': '读取我的数据',
+  'write:comment': '评论与互动',
+  'write:post': '发帖',
+  moderate: '审核',
+  delete: '删除',
+  draft: '人审草稿',
+};
+
 export class ForumError extends Error {
   constructor(message, extra = {}) {
     super(message);
@@ -36,6 +47,8 @@ export class ForumError extends Error {
     // 后端的「待办」结构（result.blockers）：code/title/desc/actionLabel/actionTo。
     // 这是门禁被拦时唯一能给出「去哪里解决」的信息，别丢。
     this.blockers = Array.isArray(extra.blockers) && extra.blockers.length ? extra.blockers : null;
+    // 服务端能力闸拦下的那一项（CliScopeFilter 的 X-Cli-Scope-Denied）：调用方要能说清「差的是哪项」。
+    if (extra.scope) this.scope = extra.scope;
   }
 }
 
@@ -182,6 +195,24 @@ export class ForumClient {
   async #finish(res, ctx = {}) {
     const json = await this.#decode(res);
     if (res.status === 401 || res.status === 403) {
+      // 403 有两种，别混成一句：账号没权限（后端判的），和**授权范围被收窄**（服务端 CliScopeFilter 判的）。
+      // 后者不是你登录过期了 —— 叫你重新登录会把人带偏，真正要做的是去设置页把能力勾回来。
+      const deniedScope = res.headers.get('x-cli-scope-denied')
+        || (json && typeof json.message === 'string' && /授权不含/.test(json.message) ? 'unknown' : null);
+      if (deniedScope) {
+        const scopeTitle = SCOPE_TITLES[deniedScope] || deniedScope;
+        throw new ForumError(
+          (json && json.message) || ('这个 AI 工具的授权不含「' + scopeTitle + '」'),
+          {
+            status: res.status,
+            detail: json,
+            code: 'E_SCOPE_DENIED',
+            scope: deniedScope,
+            hint: '这是「能力范围」不够，不是登录过期。去网页「设置 → 账号安全 → AI 工具授权」里给这个工具勾上「'
+              + scopeTitle + '」，保存后下一次请求即生效（不用重启工具）。',
+          }
+        );
+      }
       throw new ForumAuthError(
         '未登录或登录已过期（HTTP ' + res.status + '）',
         { status: res.status, detail: json, hint: '运行 narwhal-forum login，或设置 NARWHAL_FORUM_TOKEN / NARWHAL_FORUM_REFRESH_TOKEN。' }

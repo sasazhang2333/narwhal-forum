@@ -106,6 +106,7 @@ export async function startMockForum(options = {}) {
     enforceCooldown: false,
     // 门禁：真实后端在「未绑手机 / 未实名」时返回 HTTP 200 + status=-1 + result.blockers
     gateComment: null,   // 'mobile' | 'realname' | null
+    scopeDenied: null,   // 设成 scope id 时，写接口回 403 + X-Cli-Scope-Denied（模拟服务端能力闸）
     gatePost: null,
     // 真实后端：新账号/未达信任阈值 → 发帖进待审（status=-1），要审核批准才公开
     autoApprove: true,
@@ -341,6 +342,12 @@ export async function startMockForum(options = {}) {
         if (!post || post.status !== 1) return send(404, { status: 404, message: 'not found' });
         if (postMatch[2] && method === 'POST') {
           if (!authed(req)) return unauth();
+          if (state.scopeDenied) {
+            return send(403, {
+              status: 1,
+              message: '这个 AI 工具的授权不含「评论与互动」（' + state.scopeDenied + '）：已授予 read。要放宽请在设置页调整权限，保存后即刻生效。',
+            }, { 'X-Cli-Scope-Denied': state.scopeDenied });
+          }
           const payload = JSON.parse(body || '{}');
           if (!['👍', '❤️', '😂', '🎉', '🤔', '😮', '😢', '🚀'].includes(payload.emoji)) {
             return send(200, failure('不支持的表情'));
