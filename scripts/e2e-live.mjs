@@ -119,6 +119,13 @@ async function main() {
       const newId = created.structuredContent && (created.structuredContent.id || created.structuredContent.commentId);
       check('create_comment 写入了真实库', Boolean(newId), 'comment id=' + newId);
 
+      // 冒烟评论自己收走：--write 连跑几轮会在真实库里攒一堆「联调冒烟测试评论」，
+      // 而评论没有正文去重/回收站，只能一条条删（R900 清理时手工删了 13 条）。
+      if (newId) {
+        const cleaned = await call(child, pending, nextId, 'delete_comment', { commentId: String(newId), confirm: true });
+        check('delete_comment 清掉了冒烟评论', !cleaned.isError, cleaned.content && cleaned.content[0] && cleaned.content[0].text);
+      }
+
       const reacted = await call(child, pending, nextId, 'react_post', { postId, emoji: '👍' });
       check('react_post 可用', Boolean(reacted.structuredContent), JSON.stringify(reacted.structuredContent));
 
