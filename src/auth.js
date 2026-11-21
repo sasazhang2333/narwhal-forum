@@ -434,7 +434,11 @@ export async function deviceLogin(opts = {}) {
     .filter((x) => x && x !== 'all' && x !== '*');
   const timeoutMs = opts.timeoutMs ?? 300000;
   const intervalMs = opts.intervalMs ?? 2000;
-  const openBrowser = opts.openBrowser !== false;
+  // 不自动开浏览器的情况（1121：这条曾经把「跑测试」变成「默认浏览器被反复拉起」）：
+  // ① 显式传 --no-open；② NARWHAL_FORUM_NO_OPEN=1；③ 非交互终端（CI / 被别的程序调用）。
+  const noOpenEnv = String(process.env.NARWHAL_FORUM_NO_OPEN || '') === '1';
+  const interactive = Boolean(process.stdout && process.stdout.isTTY);
+  const openBrowser = opts.openBrowser !== false && !noOpenEnv && interactive;
 
   const headers = { 'User-Agent': 'Mozilla/5.0 (narwhal-forum)', 'Content-Type': 'application/json' };
 
@@ -467,6 +471,8 @@ export async function deviceLogin(opts = {}) {
   if (openBrowser) {
     const opened = openInBrowser(verifyUrl);
     if (!opened) log('（没能自动打开浏览器，请手动复制上面的地址）');
+  } else {
+    log('（没有自动打开浏览器：非交互终端，或 --no-open / NARWHAL_FORUM_NO_OPEN=1。请手动打开上面的地址）');
   }
 
   // 2. 轮询

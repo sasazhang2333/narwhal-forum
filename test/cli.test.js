@@ -168,6 +168,36 @@ test('login --device：打印的是一份真实存在的凭据文件，不是 un
   }
 });
 
+test('login --device：非交互终端不自动拉起浏览器（1121：曾经反复打开同一个地址）', async () => {
+  // 事故现象：跑测试时默认浏览器被反复拉起，停在 .../cli/authorize?code=TEST-CODE。
+  // 修法：只有「交互终端 + 没显式关掉」才 open；CI / 被别的程序调用时只打印链接。
+  const { spawn } = await import('node:child_process');
+  const devHome = fs.mkdtempSync(path.join(os.tmpdir(), 'narwhal-forum-noopen-'));
+  const env = { ...process.env, NARWHAL_FORUM_HOME: devHome, NARWHAL_FORUM_BASE_URL: mock.baseUrl };
+  delete env.NARWHAL_FORUM_NO_OPEN;
+  try {
+    const child = spawn(process.execPath, [BIN, 'login', '--device', '--accept-risk', '--timeout-sec', '20'], { env });
+    let stdout = '';
+    let stderr = '';
+    let acted = false;
+    child.stdout.on('data', (d) => { stdout += d; });
+    child.stderr.on('data', (d) => {
+      stderr += d;
+      const m = /授权码：(\S{4}-\S{4})/.exec(stderr);
+      if (!m || acted) return;
+      acted = true;
+      for (const entry of mock.state.deviceCodes.values()) {
+        if (entry.userCode === m[1]) entry.status = 'approved';
+      }
+    });
+    const code = await new Promise((resolve) => child.on('exit', resolve));
+    assert.equal(code, 0, stderr.slice(-400));
+    assert.match(stderr, /没有自动打开浏览器/, '非 TTY 时应当只打印链接：' + stderr.slice(-300));
+  } finally {
+    fs.rmSync(devHome, { recursive: true, force: true });
+  }
+});
+
 test('login --device：只写人勾选的范围（授权页勾掉的能力不会进凭据）', async () => {
   // 真后端已经支持「页面上勾选」：authorize 带 scopes 子集，poll 回的是授予集。
   // CLI 若仍把本地申请的全量写进 grantedScopes，等于绕过人的选择。

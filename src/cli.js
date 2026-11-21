@@ -30,6 +30,7 @@ const HELP = [
   '  setup                  首次接入：检查后端 → 打开浏览器授权 → 打印下一步',
   '  login                  网页授权登录（打开浏览器，登录一次即可）；--password 走账号密码；',
   '                         --device 走设备码（打印一个链接，人在自己浏览器里点「允许」）',
+  '                         --no-open 不自动打开浏览器（CI / 远程：只打印链接）',
   '                         --web-url <前端站点地址>（后端与前端不同源时用，本地开发常见）',
   '  logout                 撤销授权：后端登出 + 删除本地凭据 + 删除插件浏览器 profile',
   '  auth status            查看授权状态（是否登录、授权方式、浏览器 profile 位置）',
@@ -71,7 +72,7 @@ const HELP = [
   '          NARWHAL_FORUM_USERNAME, NARWHAL_FORUM_PASSWORD, NARWHAL_FORUM_HOME',
 ].join('\n');
 
-const GLOBAL_FLAGS = new Set(['base-url', 'token', 'refresh-token', 'username', 'password', 'timeout', 'json', 'debug', 'help', 'version', 'verbose', 'browser', 'timeout-sec', 'keep-browser', 'mode', 'yes', 'accept-risk', 'web-url']);
+const GLOBAL_FLAGS = new Set(['base-url', 'token', 'refresh-token', 'username', 'password', 'timeout', 'json', 'debug', 'help', 'version', 'verbose', 'browser', 'timeout-sec', 'keep-browser', 'mode', 'yes', 'accept-risk', 'web-url', 'no-open']);
 
 /** 可重复出现的选项：--image a.png --image b.png → 数组。 */
 const MULTI_FLAGS = new Set(['image', 'images']);
@@ -323,7 +324,8 @@ async function cmdLogin(flags) {
       clientName: 'narwhal-forum@' + VERSION,
       scopes,
       timeoutMs: seconds(flags, 300000),
-      openBrowser: flags.browser !== false,
+      // --no-open 优先于 --browser（设备码流程里的「开浏览器」指打开授权页，不是登录用的受控浏览器）
+      openBrowser: flags['no-open'] === true ? false : flags.browser !== false,
       log: (line) => process.stderr.write(line ? line + '\n' : '\n'),
     });
     // 授权页允许人勾掉一些能力：以服务端回的授予集为准（拿不到才退回本地申请的范围）

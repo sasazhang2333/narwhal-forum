@@ -265,7 +265,8 @@ export async function startMockForum(options = {}) {
       // body 在进入路由分支前已被读走（rawBuf），这里不能再去读流 —— 否则等一个已结束的流会挂住
       const payload = JSON.parse(body || '{}');
       const deviceCode = crypto.randomBytes(16).toString('hex');
-      const userCode = 'TEST-CODE';
+      // 形状与真后端一致（XXXX-XXXX，27 个去易混字符），别再出现 TEST-CODE 这种假码
+      const userCode = 'AB12-CD34';
       state.deviceCodes.set(deviceCode, {
         deviceCode, userCode,
         clientName: payload.clientName || 'unknown-client',

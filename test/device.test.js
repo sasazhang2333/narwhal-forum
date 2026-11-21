@@ -49,7 +49,8 @@ test('deviceLogin：人点允许后拿到 token，且同一个设备码只能换
     // 提示里必须给出给人看的 URL 与用户码 —— 远程机器上就靠这两行
     const text = lines.join('\n');
     assert.match(text, /\/cli\/authorize\?code=/);
-    assert.match(text, /TEST-CODE/);
+    // 用户码形状与真后端一致：XXXX-XXXX（27 个去易混字符）
+    assert.match(text, /[A-Z0-9]{4}-[A-Z0-9]{4}/);
   } finally {
     forum.server.close();
   }
