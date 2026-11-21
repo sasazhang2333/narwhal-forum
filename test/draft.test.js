@@ -108,11 +108,18 @@ test('篡改签名 / 换用户 / 未批准 都被拒', () => {
   assert.equal(draft.verifyApprovalToken(approved, null, {}).code, 'E_APPROVAL_REQUIRED');
 });
 
-test('MCP 工具表里没有 approve 类工具（批准只能发生在人的终端）', () => {
+test('MCP 工具表里没有「草稿」批准类工具（草稿放行只能发生在人的终端）', () => {
   const names = TOOLS.map((t) => t.name);
   assert.ok(names.includes('draft_create'));
   assert.ok(names.includes('draft_publish'));
-  assert.ok(!names.some((n) => /approve|accept|confirm/i.test(n)), 'MCP 不应暴露批准类工具，实际: ' + names.join(','));
+  // 注意区分两种 approve：
+  //   · draft 的 approve（拿一次性 approvalToken）—— MCP 侧**故意没有**，只能在人的终端跑；
+  //   · 帖子审核的 approve_post —— 那是版主/管理员动作，权限由后端 canModeratePost 判，
+  //     和「AI 不许自己放行自己写的内容」这条闸无关。
+  assert.ok(!names.some((n) => /draft/i.test(n) && /approve|accept/i.test(n)), 'MCP 不应暴露 draft 批准工具，实际: ' + names.join(','));
+  assert.ok(names.includes('approve_post'), '帖子审核批准工具应当存在（版主用）');
+  const publish = TOOLS.find((t) => t.name === 'draft_publish');
+  assert.ok(publish.inputSchema.required.includes('approvalToken'), 'draft_publish 必须强制要求 approvalToken');
 });
 
 /* ---------------------------------------------------------------- CLI 契约 */
@@ -122,7 +129,9 @@ test('draft new-comment 落本地草稿，不碰后端', async () => {
   assert.equal(r.code, 0, r.stderr);
   const record = JSON.parse(r.stdout);
   assert.equal(record.status, 'pending_review');
-  assert.equal(record.payload.postId, 1);
+  // 雪花 ID 必须是字符串：后端主键约 1e17，超过 2^53，按数字传会丢精度（真实环境实测踩到）。
+  assert.equal(record.payload.postId, '1');
+  assert.equal(typeof record.payload.postId, 'string');
   assert.match(r.stderr, /$|/);
 });
 

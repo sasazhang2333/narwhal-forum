@@ -10,11 +10,13 @@ import path from 'node:path';
 import { ForumClient, ForumError, ForumAuthError, REACTIONS, POST_ORDERS } from './client.js';
 import { clearCredentials, patchCredentials, readCredentials, resolveConfig } from './config.js';
 import { createDraft, readDraft, listDrafts, removeDraft, approveDraft, rejectDraft, verifyApprovalToken, markPublished, summarizeDrafts } from './draft.js';
+import { readFileSync } from 'node:fs';
 import { RISK_VERSION, RISK_ITEMS, riskNoticeText, riskSummaryText, riskAcknowledged, riskConsentPatch } from './risk.js';
 import { resolveImageList, verifyDraftImages, summarizeImages, contentWithImages, ImageError } from './images.js';
 import { TOOLS, TOOL_MAP } from './mcp/tools.js';
 
-const VERSION = '0.5.0';
+// 版本号只有一个来源：package.json（以前这里写死，结果 --version 和 npm 包版本对不上）
+const VERSION = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
 
 const HELP = [
   'narwhal-forum ' + VERSION + ' — Narwhal CMS 论坛能力包（CLI + MCP server）',
@@ -35,7 +37,8 @@ const HELP = [
   '  posts                  列出帖子（--page --page-size --category --order --title-like）',
   '  post <id>              帖子详情（--comments 一并带评论树）',
   '  comments <postId>      评论树',
-  '  categories | channels  分类 / 频道',
+  '  categories             论坛分类（发帖要的 categoryId）',
+  '  channels               站点栏目（CMS channel，不是论坛版块）',
   '  search <关键词>         全文搜索（后端 Lucene）',
   '  my-comments            我发过的评论（需登录）',
   '',
@@ -44,6 +47,9 @@ const HELP = [
   '  new-post --category <id> --title <t> --content <文本|@文件|-> [--image 图.png ...]   发帖',
   '  upload-image <图.png> [--scene chat]                     先上传图片，拿可直接内联的 URL',
   '  react <postId> [--emoji 👍]                               表情互动',
+  '  approve-post <postId>                                     批准待审帖（需审核权限：管理员/版主）',
+  '  delete-comment <id> --yes                                 删评论（作者或管理员，不可撤销）',
+  '  delete-post <postId> --yes                                删帖（作者或管理员，不可撤销）',
   '',
   '图片: --image 可重复给多张（最多 9 张），发布时自动上传并把 ![](url) 内联到正文末尾；',
   '      草稿模式下只记本机路径 + sha256，发布前重新校验，防止「批准 A 发布 B」。',
@@ -148,6 +154,9 @@ const COMMANDS = {
   'new-post': { tool: 'create_post', map: { category: 'categoryId', title: 'title', content: 'content', summary: 'summary', type: 'type', cover: 'cover', image: 'images' }, ints: ['categoryId'] },
   'upload-image': { tool: 'upload_image', positional: ['path'], map: { scene: 'scene' }, ints: [] },
   react: { tool: 'react_post', positional: ['postId'], map: { emoji: 'emoji' }, ints: [] },
+  'approve-post': { tool: 'approve_post', positional: ['postId'], ints: [] },
+  'delete-comment': { tool: 'delete_comment', positional: ['commentId'], map: { yes: 'confirm' }, ints: [] },
+  'delete-post': { tool: 'delete_post', positional: ['postId'], map: { yes: 'confirm' }, ints: [] },
   whoami: { tool: 'whoami' },
   status: { tool: 'status' },
 };
@@ -505,9 +514,9 @@ async function cmdDraft(sub, flags, rest) {
       const client = clientFrom(flags);
       const author = await safeWhoami(client);
       const payload = action === 'new-comment'
-        ? { postId: Number(id), content: content }
+        ? { postId: String(id), content: content }
         : { title: String(flags.title), content: content, categoryId: Number(flags.category) };
-      if (action === 'new-comment' && flags.parent !== undefined) payload.parentId = Number(flags.parent);
+      if (action === 'new-comment' && flags.parent !== undefined) payload.parentId = String(flags.parent);
       if (action === 'new-post' && flags.summary !== undefined) payload.summary = String(flags.summary);
       const images = resolveImageList(flags.image);
       if (images.length) payload.images = images.map((img) => ({ path: img.path, name: img.name, mime: img.mime, bytes: img.bytes, sha256: img.sha256 }));

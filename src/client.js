@@ -386,17 +386,58 @@ export class ForumClient {
     return out;
   }
 
-  /** GET /api/bbs/comment → 评论树（children 嵌套）。 */
+  /**
+   * 评论树（children 嵌套）。
+   *
+   * ⚠️ 2026-11-21 实测修正：`GET /api/bbs/comment?postId=&parentId=0` **只回一级评论**，
+   * 嵌套回复在另一个端点 `GET /api/bbs/comment/{commentId}/replies`（后端 Pageable，
+   * pageSize 上限 20）。原来这里只打一次就当成「树」，结果是：回复发成功了、列表里看不见，
+   * 计数也少（实测第 5 条回复没出现）。所以现在自己逐层拼：
+   *   - 默认最多 walkDepth=3 层、最多 maxRequests=60 次请求（热门帖不会把后端打爆）；
+   *   - 超预算时停止展开，并在返回数组上挂 `truncated=true`，由调用方决定怎么提示；
+   *   - withReplies=false 时退化成「只拉一级」（省请求，适合只看最新几条）。
+   */
   async listComments(opts = {}) {
     if (!opts.postId) throw new ForumError('缺少 postId');
-    const result = await this.request('/api/bbs/comment', {
-      query: {
-        postId: opts.postId,
-        parentId: opts.parentId === undefined ? 0 : opts.parentId,
-        sort: opts.sort || 'oldest',
-      },
-    });
-    return Array.isArray(result) ? result : [];
+    const postId = opts.postId;
+    const sort = opts.sort || 'oldest';
+    const withReplies = opts.withReplies !== false;
+    const maxDepth = opts.walkDepth === undefined ? 3 : Number(opts.walkDepth) || 3;
+    const maxRequests = opts.maxRequests === undefined ? 60 : Number(opts.maxRequests) || 60;
+
+    const level = async (parentId) => {
+      const result = await this.request('/api/bbs/comment', {
+        query: { postId, parentId, sort },
+      });
+      return Array.isArray(result) ? result : [];
+    };
+
+    const top = await level(opts.parentId === undefined ? 0 : opts.parentId);
+    let truncated = false;
+    let left = maxRequests;
+
+    const walk = async (nodes, depth) => {
+      for (const node of nodes) {
+        if (depth > maxDepth) { truncated = true; return; }
+        if (left <= 0) { truncated = true; return; }
+        left -= 1;
+        let replies = [];
+        try {
+          const r = await this.listReplies(node.id, { page: 1, pageSize: 20, sort });
+          replies = (r && Array.isArray(r.content) ? r.content : Array.isArray(r) ? r : []);
+        } catch {
+          // 单条评论的回复拉不到（被删/被隐藏）不该让整棵树失败
+          replies = [];
+        }
+        if (replies.length) {
+          node.children = replies;
+          await walk(replies, depth + 1);
+        }
+      }
+    };
+    if (withReplies) await walk(top, 1);
+    Object.defineProperty(top, 'truncated', { value: truncated, enumerable: false });
+    return top;
   }
 
   /** GET /api/bbs/comment/{commentId}/replies → 分页平铺。 */
@@ -484,9 +525,17 @@ export class ForumClient {
   }
 
   /** GET /api/bbs/channel */
+  /**
+   * 站点栏目（CMS channel）。
+   *
+   * ⚠️ 2026-11-21 实测修正：原来打的是 `/api/bbs/channel`，这个端点在真实后端上
+   * **不存在**（那个 Controller 是「创作者频道自助申请」那一套：self-serve / apply /
+   * my-channel …，没有列表 GET），所以一直 404。真正的栏目列表是 CMS 的 `/api/channel`
+   * （返回扁平数组，不分页）。论坛的「版块」是 category，不是 channel —— 用 listCategories。
+   */
   async listChannels(opts = {}) {
-    const result = await this.request('/api/bbs/channel', {
-      query: { page: Number(opts.page) || 1, pageSize: Math.min(Number(opts.pageSize) || 20, 200) },
+    const result = await this.request('/api/channel', {
+      query: {},
     });
     if (Array.isArray(result)) return { items: result, total: result.length };
     const items = arrayFrom(result);
@@ -494,6 +543,37 @@ export class ForumClient {
   }
 
   /** POST /api/bbs/post/{id}/reactions —— 表情互动（toggle）。 */
+  /**
+   * DELETE /api/bbs/comment/{id} —— 删评论（作者本人或管理员）。
+   * 后端成功时回 `{status:0}` 信封，失败（非作者）回 403「Only the author can delete this comment」。
+   */
+  async deleteComment(opts = {}) {
+    this.ensureAuth('删除评论');
+    if (!opts.commentId) throw new ForumError('缺少 commentId');
+    return this.request('/api/bbs/comment/' + encodeURIComponent(opts.commentId), { method: 'DELETE' });
+  }
+
+  /** DELETE /api/bbs/post/{id} —— 删帖（作者本人或管理员）。 */
+  async deletePost(opts = {}) {
+    this.ensureAuth('删除帖子');
+    if (!opts.postId) throw new ForumError('缺少 postId');
+    return this.request('/api/bbs/post/' + encodeURIComponent(opts.postId), { method: 'DELETE' });
+  }
+
+  /**
+   * PUT /api/bbs/post/{id}/approve —— 批准待审帖。
+   *
+   * 为什么需要它：实测里「新用户/未达信任阈值的账号发帖」一律进 `status_=-1`（待审），
+   * 连管理员自己发的也待审（`BbsPostApiController` 的 autoApprove 取决于
+   * moderationConfig.shouldAutoApprove），不批准就不出现在列表里。权限是后端判的
+   * （`canModeratePost`：管理员或该版块版主），没有权限会拿到 403。
+   */
+  async approvePost(opts = {}) {
+    this.ensureAuth('批准帖子');
+    if (!opts.postId) throw new ForumError('缺少 postId');
+    return this.request('/api/bbs/post/' + encodeURIComponent(opts.postId) + '/approve', { method: 'PUT' });
+  }
+
   async react(opts = {}) {
     this.ensureAuth('表情互动');
     const emoji = opts.emoji || '👍';

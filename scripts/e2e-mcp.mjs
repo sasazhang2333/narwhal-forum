@@ -96,7 +96,7 @@ async function main() {
 
     const tools = await call(2, 'tools/list', {});
     const names = (tools.tools || []).map((t) => t.name);
-    check('tools/list 返回 20 个能力', names.length === 20, names.length + ' :: ' + names.join(','));
+    check('tools/list 返回 20+ 个能力', names.length >= 20, names.length + ' :: ' + names.join(','));
     check('包含 upload_image', names.includes('upload_image'), '');
     const cc = (tools.tools || []).find((t) => t.name === 'create_comment');
     check('create_comment 支持 images', cc && cc.inputSchema && cc.inputSchema.properties && cc.inputSchema.properties.images, '');

@@ -100,13 +100,16 @@ narwhal-forum whoami
 | `posts` | 帖子列表（`--page --page-size --category --order --title-like`） | 否 |
 | `post <id>` | 帖子详情（`--comments` 带评论树，`--comment-sort`） | 否 |
 | `comments <postId>` | 评论树 | 否 |
-| `categories` / `channels` | 分类 / 频道 | 否 |
+| `categories` / `channels` | 论坛分类 / 站点栏目（CMS channel，非版块） | 否 |
 | `search <关键词>` | 全文搜索（后端 Lucene） | 否 |
 | `my-comments` | 我发过的评论 | 是 |
 | `new-comment <postId> --content <文本|-> [--image 图.png]` | 发表评论 / 回复（`--parent` 指定父评论；`--image` 可重复，见 4.4） | 是 |
 | `new-post --category <id> --title <t> --content <文本|@file|-> [--image 图.png]` | 发帖 | 是 |
 | `upload-image <图.png> [--scene chat]` | 单独上传一张图，返回可写进 markdown 的 URL | 是 |
 | `react <postId> [--emoji 👍]` | 表情互动 | 是 |
+| `approve-post <postId>` | 批准待审帖（需审核权限：管理员/版主） | 是 |
+| `delete-comment <id> --yes` | 删评论（作者/管理员，**不可撤销**，`--yes` 才执行） | 是 |
+| `delete-post <postId> --yes` | 删帖（作者/管理员，**不可撤销**，`--yes` 才执行） | 是 |
 | `draft <子命令>` | **人审发布**：`new-comment` `new-post` `list` `show` `approve` `reject` `publish` `discard`（见 4.3） | 视子命令 |
 | `mcp` | 以 MCP stdio server 运行 | — |
 | `tools [--json]` | 列出全部能力及参数 schema | — |
@@ -118,7 +121,9 @@ narwhal-forum whoami
 ```bash
 echo '从 stdin 来的正文' | narwhal-forum new-comment 42 --content -
 narwhal-forum new-post --category 3 --title '标题' --content @draft.md
-narwhal-forum call create_comment --json '{"postId":42,"content":"hi"}'
+narwhal-forum call create_comment --json '{"postId":"101589601795420674","content":"hi"}'
+narwhal-forum approve-post 101589950310625794
+narwhal-forum delete-post 101589950310625794 --yes
 ```
 
 退出码：`0` 成功 / `1` 业务或网络错误 / `2` 用法错误（含人审令牌校验失败）/ `3` 未实名，不能发布。加 `--json` 输出机器可读结果。
@@ -398,13 +403,16 @@ NARWHAL_FORUM_BASE_URL = "http://127.0.0.1:8080"
 | `get_post` | 帖子详情 | `postId` `withComments` `commentSort` | ✅ | 否 |
 | `list_comments` | 评论树 | `postId` `sort` | ✅ | 否 |
 | `list_categories` | 分类 | `page` `pageSize` | ✅ | 否 |
-| `list_channels` | 频道 | `page` `pageSize` | ✅ | 否 |
+| `list_channels` | **站点栏目**（CMS channel，非论坛版块） | — | ✅ | 否 |
 | `search_posts` | 搜索 | `q` `categoryId` `userId` `dateFrom` `dateTo` `sort` `page` `pageSize` | ✅ | 否 |
 | `my_comments` | 我的评论 | `page` `pageSize` | ✅ | 是 |
 | `create_comment` | 发表评论 | `postId` `content` `parentId?` `replyUserId?` `whisper?` `images?` | ❌ | 是 |
 | `create_post` | 发帖 | `categoryId` `title` `content` `summary?` `type?` `cover?` `images?` | ❌ | 是 |
 | `upload_image` | 上传一张图，返回 URL | `path` `scene?` | ❌ | 是 |
 | `react_post` | 表情互动 | `postId` `emoji` | ❌ | 是 |
+| `approve_post` | 批准待审帖（管理员/版主） | `postId` | ❌ | 是 |
+| `delete_comment` | 删评论（作者/管理员，**不可撤销**） | `commentId` `confirm=true` | ❌ | 是 |
+| `delete_post` | 删帖（作者/管理员，**不可撤销**） | `postId` `confirm=true` | ❌ | 是 |
 | `draft_create` | 落本地草稿（**不发出去**） | `kind` `content` `postId?` `parentId?` `replyUserId?` `whisper?` `categoryId?` `title?` `summary?` `images?` | ❌（不联网） | 否 |
 | `draft_list` | 草稿列表 | `status?` | ✅ | 否 |
 | `draft_get` | 单条草稿 | `draftId` | ✅ | 否 |
@@ -414,6 +422,13 @@ NARWHAL_FORUM_BASE_URL = "http://127.0.0.1:8080"
 `order` 取值：`newest` `hot` `trending` `unanswered` `following` `most-collected` `best-all-time` `on-this-day`。
 `emoji` 白名单：👍 ❤️ 😂 🎉 🤔 😮 😢 🚀。
 `images` 是**本地文件路径数组**（最多 9 张）：工具内部先上传再内联 markdown，调用方不需要自己拼 URL。
+
+两个容易踩的点（都在真实后端上验过）：
+
+- **所有 id 都是雪花号**，schema 里一律声明成 `string`。按数字传会被 JSON 的双精度截断
+  （`101589601795420674` → `…670`），后端稳定 404。CLI 里照原样贴字符串就行。
+- `delete_comment` / `delete_post` 必须带 `confirm=true`（CLI：`--yes`）才执行，
+  没带就只回一句「这是不可撤销操作」，不会动数据。
 
 ---
 
@@ -437,14 +452,29 @@ NARWHAL_FORUM_BASE_URL = "http://127.0.0.1:8080"
 
 - **已支持**：图片（评论/发帖内联，见 4.4）。
 - **未实现**：非图片附件、通知、私信、收藏与关注列表（后端有接口但未纳入本包；`call` 逃生舱可临时补位）。
-- **验证边界**（三层，已跑过的都标了）：
-  1. **单元/集成**：93 个用例跑在进程内 mock 后端（同一套契约）。
+- **验证边界**（三层，都已跑过）：
+  1. **单元/集成**：104 个用例跑在进程内 mock 后端（同一套契约）。
   2. **MCP 端到端**：`npm run test:e2e`（`scripts/e2e-mcp.mjs`）用 dsh 桌面端**实际会 spawn 的那条命令**、在
      `PATH=/usr/bin:/bin:/usr/sbin:/sbin`（没有 node / npx）的干净环境里走完
-     initialize → tools/list（20 个）→ `list_posts` → `upload_image` → `create_comment` 带图，并校验 mock 里
+     initialize → tools/list（23 个）→ `list_posts` → `upload_image` → `create_comment` 带图，并校验 mock 里
      落库的正文确实是 `![](http://…)`。10/10 通过 —— 这一层证明「桌面端 PATH 里没有 node」不再是阻塞。
-  3. **真实论坛**：未完成。需要 narwhal-cms 后端在 `8080` 运行且手上有论坛账号；本轮尝试起后端时
-     数据库口令不在本机会话可见范围内（`.env` 属敏感路径，读取被策略拦下），因此没有伪造或猜测凭据。
+  3. **真实论坛**：`node scripts/e2e-live.mjs --write` 连真后端（narwhal-cms + MySQL + Redis）跑，**11/11 通过**：
+     20+ 工具、雪花 id 以字符串传、`list_posts` / `get_post`（含评论树）/ `list_comments` 读真实数据、
+     `create_comment` 写库、`react_post` toggle、`create_post` 返回真实 `status`、待审时 `approve_post` 放行、
+     `delete_post` 清理自造的冒烟帖。另手工验过：图片上传 + 带图评论、嵌套回复、搜索、CMS 栏目、草稿人审闸。
+
+### 8.1 真实后端实测踩到的 5 个坑（都已修，附成因）
+
+这些不是「理论上可能」，是本轮连真后端时**实际把功能跑坏**的东西：
+
+| 现象 | 成因 | 修法 |
+| --- | --- | --- |
+| `get_post` 稳定 404，id 看着对但不一致 | 雪花 id 超过 2^53，JSON 按数字解析被截断（…674 → …670） | 所有 id 在 schema 里改成 `string`，数字传进来直接报错并给出提示 |
+| `list_channels` 永远 404 | `/api/bbs/channel` 在真后端是「创作者频道自助申请」那套（self-serve/apply/my-channel），**没有列表 GET**；真正的栏目列表是 CMS 的 `/api/channel`（扁平数组、不分页） | 改打 `/api/channel`，工具改名为「站点栏目」，并在描述里点名「论坛版块请用 `list_categories`」 |
+| 搜索结果时间显示成 `1795248388000` | Lucene 返回的 `created` 是**毫秒时间戳的字符串**，`new Date('1795…')` 在 V8 里是 Invalid Date | `fmtTime` 显式认 10/13 位数字（秒/毫秒） |
+| 回复发出去了，评论树里看不见、计数也少 | `GET /api/bbs/comment?postId=&parentId=0` **只回直接子级**，嵌套回复在 `/api/bbs/comment/{id}/replies`（Pageable，pageSize 上限 20） | 逐层拉 replies 拼 `children`（默认 3 层 / 60 次请求封顶，超了标 `truncated`） |
+| 发帖成功但列表里没有 | 新账号/未达信任阈值 → 后端给 `status_=-1`（待审），**管理员自己发的也待审**；原来工具无条件说「已发布」 | 按后端真实 `status` 说话（1=已发布，-1=待审并提示用 `approve_post`），并新增 `approve_post` 工具 |
+
 - 浏览器授权把「开浏览器 + 取 token」抽成可注入的取值函数来测，真实弹窗需要人工验证一次。
 - **仓库**：GitHub 私有仓 `sasazhang2333/narwhal-forum`（与 narwhal-cms 同级存放，本地目录名同名）。
 - **待确认**：是否发布到 npm 私有源（`npx narwhal-forum` 现在需先 `npm i -g`，或用 `npx --package <tarball>`）。

@@ -17,13 +17,47 @@ const S = {
   images: (description) => ({ type: 'array', items: { type: 'string' }, description, maxItems: MAX_IMAGES }),
 };
 
+/**
+ * 雪花 ID 的 schema：必须是字符串。
+ *
+ * 后端主键是 Snowflake（约 1e17），超过 JS 的 Number.MAX_SAFE_INTEGER（2^53）。
+ * 一旦按 integer 下发，JSON-RPC 侧解析会把 101589601795420674 变成
+ * 101589601795420670 —— 请求照发、后端按这个不存在的 id 查不到，报出来像「后端 404」，
+ * 实际是调用方先丢了精度（真实环境实测踩到，见 README「已知陷阱」）。
+ */
+const idField = (description) => ({
+  type: 'string',
+  description: description + '（雪花 ID，原样传字符串；不要转成数字，会丢精度）',
+});
+
+/** 把入参里的 ID 统一成字符串；数字若超出安全整数范围就报错，而不是静默查不到。 */
+function asId(value, label) {
+  if (value === undefined || value === null || value === '') return undefined;
+  if (typeof value === 'number') {
+    if (!Number.isSafeInteger(value)) {
+      throw new Error(
+        label + ' 必须是字符串（收到 ' + value + '）：雪花 ID 超过 2^53，按数字传会丢精度。请从 list_posts / list_comments 里直接复制字符串 id。'
+      );
+    }
+    return String(value);
+  }
+  return String(value);
+}
+
 function obj(props, required = []) {
   return { type: 'object', properties: props, required, additionalProperties: false };
 }
 
 function fmtTime(value) {
   if (!value) return '';
-  const d = new Date(value);
+  // 搜索接口（Lucene）返回的 created 是「毫秒时间戳的字符串」，new Date('1795248388000')
+  // 在 V8 里是 Invalid Date —— 之前列表里直接显示成了一串数字。这里显式认 10/13 位数字。
+  let v = value;
+  if (typeof v === 'number' || (typeof v === 'string' && /^\d{10,16}$/.test(v.trim()))) {
+    const n = Number(v);
+    v = String(v).trim().length <= 10 ? n * 1000 : n;
+  }
+  const d = new Date(v);
   if (Number.isNaN(d.getTime())) return String(value);
   const pad = (n) => String(n).padStart(2, '0');
   return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
@@ -251,7 +285,7 @@ export const TOOLS = [
       page: S.int('页码，从 1 开始', { minimum: 1, default: 1 }),
       pageSize: S.int('每页条数（1-100）', { minimum: 1, maximum: 100, default: 20 }),
       categoryId: S.int('按分类 id 过滤'),
-      userId: S.int('按作者 userId 过滤'),
+      userId: idField('按作者 userId 过滤'),
       titleLike: S.str('标题模糊匹配（后端 LIKE）'),
       order: S.str('排序端点', { enum: Object.keys(POST_ORDERS), default: 'newest' }),
     }),
@@ -265,17 +299,18 @@ export const TOOLS = [
     title: '读取帖子详情',
     description: '按 id 读取帖子正文（markdown）。会把阅读数 +1；已删除/隐藏的帖子返回 404。需要一并看评论时传 with_comments=true（等价于再调 list_comments）。会员/付费专栏内容会返回截断正文并标注。',
     inputSchema: obj({
-      postId: S.int('帖子 id'),
+      postId: idField('帖子 id'),
       withComments: S.bool('同时返回完整评论树', { default: false }),
       commentSort: S.str('评论排序（oldest/newest）', { enum: ['oldest', 'newest'], default: 'oldest' }),
     }, ['postId']),
     async handler(ctx, args) {
-      const r = await ctx.client.getPost(args.postId, { withComments: args.withComments, commentSort: args.commentSort });
+      const postId = asId(args.postId, 'postId');
+      const r = await ctx.client.getPost(postId, { withComments: args.withComments, commentSort: args.commentSort });
       const parts = [renderPost(r.post)];
       if (r.comments) {
         parts.push('');
         parts.push('---');
-        parts.push(renderComments(r.comments, { postId: args.postId }));
+        parts.push(renderComments(r.comments, { postId }));
       }
       return { text: parts.join('\n'), data: r };
     },
@@ -283,14 +318,19 @@ export const TOOLS = [
   {
     name: 'list_comments',
     title: '读取帖子评论',
-    description: '读取某个帖子的评论树（含嵌套回复，按层级缩进展示），返回 id / 作者 / 时间 / 正文。匿名可用。要回复某条评论时，把它在结果里的 id 作为 create_comment 的 parentId。',
+    description: '读取某个帖子的评论树（含嵌套回复，按层级缩进展示），返回 id / 作者 / 时间 / 正文。匿名可用。要回复某条评论时，把它在结果里的 id 作为 create_comment 的 parentId。实现说明：后端一级接口只回直接子级，嵌套回复由插件逐层调 /comment/{id}/replies 拼出来（默认最多 3 层、最多 60 次请求；超预算会提示「已截断」）。',
     inputSchema: obj({
-      postId: S.int('帖子 id'),
+      postId: idField('帖子 id'),
       sort: S.str('排序', { enum: ['oldest', 'newest'], default: 'oldest' }),
     }, ['postId']),
     async handler(ctx, args) {
-      const tree = await ctx.client.listComments(args);
-      return { text: renderComments(tree, { postId: args.postId }), data: { postId: args.postId, total: countComments(tree), tree } };
+      const postId = asId(args.postId, 'postId');
+      const tree = await ctx.client.listComments({ ...args, postId });
+      const truncNote = tree && tree.truncated ? '\n（⚠️ 回复层数/请求预算已截断，更深的回复请用 get_post + 逐条 replies，或调小页面规模）' : '';
+      return {
+        text: renderComments(tree, { postId }) + truncNote,
+        data: { postId, total: countComments(tree), truncated: Boolean(tree && tree.truncated), tree },
+      };
     },
   },
   {
@@ -314,19 +354,42 @@ export const TOOLS = [
     title: '发表评论',
     description: '在指定帖子下发评论；传 parentId 则回复该条评论。需要登录。正文 1-2000 字（含图片 markdown）；同一用户两次评论有 15 秒冷却，目标帖若开启慢速模式或已锁定会被拒绝；命中敏感词直接失败。成功后返回新评论 id。images 传本机图片路径数组时会先上传再把 ![](url) 内联到正文末尾（后端零改动，图片审核在上传时完成）。⚠️ 由 AI 代写或代发的内容必须先走人审：draft_create → 人在终端 draft approve → draft_publish；不要直接调用本工具上线未经人审的内容。',
     inputSchema: obj({
-      postId: S.int('帖子 id'),
+      postId: idField('帖子 id'),
       content: S.str('评论正文，1-2000 字'),
-      parentId: S.int('父评论 id（回复某条评论时传）'),
-      replyUserId: S.int('被回复用户 id（后端用于 @ 提示，可选）'),
+      parentId: idField('父评论 id（回复某条评论时传）'),
+      replyUserId: idField('被回复用户 id（后端用于 @ 提示，可选）'),
       whisper: S.bool('是否悄悄话（仅部分版块支持）'),
       images: S.images('本地图片路径（最多 ' + MAX_IMAGES + ' 张），会自动上传并内联为 markdown 图片'),
     }, ['postId']),
     async handler(ctx, args) {
-      const r = await ctx.client.createComment(args);
-      const id = r && (r.id || (r.result && r.result.id));
+      const payload = {
+        ...args,
+        postId: asId(args.postId, 'postId'),
+        parentId: asId(args.parentId, 'parentId'),
+        replyUserId: asId(args.replyUserId, 'replyUserId'),
+      };
+      const r = await ctx.client.createComment(payload);
+      let id = r && (r.id || (r.result && r.result.id));
+      // 后端 create 接口不回 body（实测 2026-11-21：data 为 null），所以「新评论 id」
+      // 只能自己去查最新一条：my_comments 按新→旧，第一条就是刚发的。
+      // 拿不到也不算失败（评论已经写进去了），只是 id 为 null。
+      if (!id && typeof ctx.client.listMyComments === 'function') {
+        try {
+          const mine = await ctx.client.listMyComments({ page: 1, pageSize: 1 });
+          const first = mine && mine.items && mine.items[0];
+          if (first && String(first.postId) === String(payload.postId)) id = first.id;
+        } catch {
+          /* 查最新评论失败不影响「评论已发表」这个事实 */
+        }
+      }
       return {
-        text: '评论已发表' + (id ? '（id=' + id + '）' : '') + '：postId=' + args.postId + (args.parentId ? '，parentId=' + args.parentId : '') + '。',
-        data: r,
+        text:
+          '评论已发表' +
+          (id ? '（id=' + id + '）' : '（后端未回 id，可用 my_comments 查最新一条）') +
+          '：postId=' + payload.postId +
+          (payload.parentId ? '，parentId=' + payload.parentId : '') +
+          '。',
+        data: { id: id || null, postId: payload.postId, parentId: payload.parentId || null, raw: r || null },
       };
     },
   },
@@ -346,7 +409,22 @@ export const TOOLS = [
     async handler(ctx, args) {
       const r = await ctx.client.createPost(args);
       const id = r && r.id;
-      return { text: '帖子已发布' + (id ? '（id=' + id + '）' : '') + '：' + args.title, data: r };
+      const status = r && r.status;
+      // ⚠️ 实测（2026-11-21）：新账号/未达信任阈值的账号发帖后端一律给 status=-1（待审），
+      // 连管理员自己发的也会被放进审核队列。原来这里无条件输出「已发布」，用户会以为帖子
+      // 丢了（列表里看不到）。所以按后端回的真实 status 说话。
+      let text;
+      if (status === 1) {
+        text = '帖子已发布' + (id ? '（id=' + id + '）' : '') + '：' + args.title;
+      } else if (status === -1) {
+        text =
+          '帖子已提交，正在待审（status=-1）' +
+          (id ? '：id=' + id : '') +
+          '。\n👉 待审帖不会出现在列表里；有审核权限的账号用 approve_post 批准后才会公开。';
+      } else {
+        text = '帖子已提交' + (id ? '（id=' + id + '）' : '') + (status === undefined ? '' : '，status=' + status) + '：' + args.title;
+      }
+      return { text, data: r };
     },
   },
   {
@@ -366,16 +444,22 @@ export const TOOLS = [
   },
   {
     name: 'list_channels',
-    title: '列出论坛频道',
-    description: '列出论坛频道（id / 名称 / 类型），用于按频道浏览内容。匿名可用。',
+    title: '列出站点栏目（CMS channel）',
+    description: '列出站点栏目（CMS channel：id / 名称 / alias / 站点），匿名可用。⚠️ 论坛的「版块」是 category，请用 list_categories；channel 是 CMS 内容栏目（文章挂在栏目下）。',
     inputSchema: obj({
       page: S.int('页码', { minimum: 1, default: 1 }),
       pageSize: S.int('每页条数', { minimum: 1, maximum: 200, default: 20 }),
     }),
     async handler(ctx, args) {
       const r = await ctx.client.listChannels(args);
-      const lines = ['频道（共 ' + r.total + ' 个）'];
-      for (const c of r.items) lines.push('- #' + c.id + ' ' + (c.name || c.title || '') + (c.type ? ' [' + c.type + ']' : ''));
+      const lines = ['站点栏目（共 ' + r.total + ' 个）'];
+      for (const c of r.items) {
+        const bits = ['#' + c.id, c.name || c.title || '(无名称)'];
+        if (c.alias) bits.push('alias=' + c.alias);
+        if (c.site && c.site.name) bits.push('站点=' + c.site.name);
+        if (c.depth) bits.push('层级=' + c.depth);
+        lines.push('- ' + bits.join(' · '));
+      }
       return { text: lines.join('\n'), data: r };
     },
   },
@@ -386,7 +470,7 @@ export const TOOLS = [
     inputSchema: obj({
       q: S.str('搜索关键词'),
       categoryId: S.int('限定分类'),
-      userId: S.int('限定作者'),
+      userId: idField('限定作者'),
       dateFrom: S.str('起始日期（YYYY-MM-DD）'),
       dateTo: S.str('结束日期（YYYY-MM-DD）'),
       sort: S.str('排序（relevance/newest）', { enum: ['relevance', 'newest'], default: 'relevance' }),
@@ -420,13 +504,61 @@ export const TOOLS = [
     title: '给帖子发表情',
     description: '给帖子点表情（同一点第二次会取消）。需要登录。可用表情固定为：' + REACTIONS.join(' ') + '。返回 toggled=on/off。',
     inputSchema: obj({
-      postId: S.int('帖子 id'),
+      postId: idField('帖子 id'),
       emoji: S.str('表情（默认 👍）', { enum: REACTIONS, default: '👍' }),
     }, ['postId']),
     async handler(ctx, args) {
-      const r = await ctx.client.react(args);
+      const postId = asId(args.postId, 'postId');
+      const r = await ctx.client.react({ ...args, postId });
       const state = r && (r.toggled || r.state);
-      return { text: '表情 ' + (args.emoji || '👍') + ' 已' + (state === 'off' ? '取消' : '添加') + '（postId=' + args.postId + '）', data: r };
+      return { text: '表情 ' + (args.emoji || '👍') + ' 已' + (state === 'off' ? '取消' : '添加') + '（postId=' + postId + '）', data: r };
+    },
+  },
+  {
+    name: 'approve_post',
+    title: '批准待审帖（版主/管理员）',
+    description: '把待审（status=-1）的帖子批准为公开。需要登录且有审核权限：管理员，或该帖所属版块的版主；无权限时后端返回 403「No permission」。⚠️ 实测：新账号/未达信任阈值的账号发帖一律进待审，不批准就不会出现在列表里。',
+    inputSchema: obj({
+      postId: idField('帖子 id'),
+    }, ['postId']),
+    async handler(ctx, args) {
+      const postId = asId(args.postId, 'postId');
+      const r = await ctx.client.approvePost({ postId });
+      return { text: '已批准帖子 #' + postId + '（现在应可在列表里看到）', data: r };
+    },
+  },
+  {
+    name: 'delete_comment',
+    title: '删除评论',
+    description: '删除一条评论（作者本人或管理员）。**不可撤销**，所以必须显式传 confirm=true，否则工具拒绝执行。需要登录。',
+    inputSchema: obj({
+      commentId: idField('评论 id'),
+      confirm: S.bool('确认删除（必须为 true）', { default: false }),
+    }, ['commentId']),
+    async handler(ctx, args) {
+      const commentId = asId(args.commentId, 'commentId');
+      if (args.confirm !== true) {
+        return { text: '未删除：这是不可撤销操作，确认请带 confirm=true 重试。', data: { deleted: false, commentId } };
+      }
+      const r = await ctx.client.deleteComment({ commentId });
+      return { text: '已删除评论 #' + commentId, data: { deleted: true, commentId, raw: r } };
+    },
+  },
+  {
+    name: 'delete_post',
+    title: '删除帖子',
+    description: '删除一个帖子（作者本人或管理员）。**不可撤销**，必须显式传 confirm=true，否则工具拒绝执行。需要登录。',
+    inputSchema: obj({
+      postId: idField('帖子 id'),
+      confirm: S.bool('确认删除（必须为 true）', { default: false }),
+    }, ['postId']),
+    async handler(ctx, args) {
+      const postId = asId(args.postId, 'postId');
+      if (args.confirm !== true) {
+        return { text: '未删除：这是不可撤销操作，确认请带 confirm=true 重试。', data: { deleted: false, postId } };
+      }
+      const r = await ctx.client.deletePost({ postId });
+      return { text: '已删除帖子 #' + postId, data: { deleted: true, postId, raw: r } };
     },
   },
   {
@@ -435,10 +567,10 @@ export const TOOLS = [
     description: '把要发布的内容写成**本地草稿**，不碰后端、也不上线。这是 AI 发布内容的唯一入口：草稿必须由人在自己的终端里运行 `narwhal-forum draft approve <id>` 批准，拿到一次性 approvalToken 之后才能用 draft_publish 发布。MCP 侧没有 approve 工具（故意的）。',
     inputSchema: obj({
       kind: S.str('草稿类型：comment=评论 / post=发帖', { enum: ['comment', 'post'] }),
-      postId: S.int('评论目标帖子 id（kind=comment 必填）'),
+      postId: idField('评论目标帖子 id（kind=comment 必填）'),
       content: S.str('正文（评论 1-2000 字；帖子 <=100000 字）'),
-      parentId: S.int('回复某条评论时传父评论 id（kind=comment 可选）'),
-      replyUserId: S.int('被回复用户 id（可选）'),
+      parentId: idField('回复某条评论时传父评论 id（kind=comment 可选）'),
+      replyUserId: idField('被回复用户 id（可选）'),
       whisper: S.bool('是否悄悄话（仅部分版块支持）'),
       categoryId: S.int('分类 id（kind=post 必填，用 list_categories 查）'),
       title: S.str('标题（kind=post 必填，<=200 字）'),
@@ -457,9 +589,9 @@ export const TOOLS = [
       }
       if (args.kind === 'comment') {
         if (!args.postId) throw draftFailure('E_DRAFT_ARGS', 'kind=comment 需要 postId');
-        payload = { postId: Number(args.postId), content };
-        if (args.parentId !== undefined) payload.parentId = Number(args.parentId);
-        if (args.replyUserId !== undefined) payload.replyUserId = Number(args.replyUserId);
+        payload = { postId: asId(args.postId, 'postId'), content };
+        if (args.parentId !== undefined) payload.parentId = asId(args.parentId, 'parentId');
+        if (args.replyUserId !== undefined) payload.replyUserId = asId(args.replyUserId, 'replyUserId');
         if (args.whisper !== undefined) payload.whisper = Boolean(args.whisper);
       } else if (args.kind === 'post') {
         if (!args.title) throw draftFailure('E_DRAFT_ARGS', 'kind=post 需要 title');

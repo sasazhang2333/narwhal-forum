@@ -169,3 +169,26 @@ test('连不上后端时给出可执行提示', async () => {
     return true;
   });
 });
+
+/* ---------------------------------------------- 评论树：一级 + /replies 两层端点 */
+
+test('listComments 会自己去拉嵌套回复（一级端点只回直接子级）', async () => {
+  const tree = await anon().listComments({ postId: 1 });
+  assert.equal(tree.length, 1, '一级只有 seed 里的 id=100');
+  assert.equal(tree[0].id, 100);
+  assert.ok(Array.isArray(tree[0].children), '必须挂了 children');
+  assert.equal(tree[0].children.length, 1, '回复 101 应被拼进 children');
+  assert.equal(tree[0].children[0].id, 101);
+  assert.ok(
+    mock.state.requests.some((r) => String(r.pathname).includes('/api/bbs/comment/100/replies')),
+    '应该请求过 /comment/100/replies，实际: ' + JSON.stringify(mock.state.requests.map((r) => r.pathname))
+  );
+  assert.equal(flattenComments(tree).length, 2, '展平后应是 2 条');
+});
+
+test('withReplies=false 时只拉一级，不多打请求', async () => {
+  const tree = await anon().listComments({ postId: 1, withReplies: false });
+  assert.equal(tree.length, 1);
+  assert.equal(tree[0].children, undefined);
+  assert.ok(!mock.state.requests.some((r) => String(r.pathname).includes('/replies')), '不应请求 /replies');
+});

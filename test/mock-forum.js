@@ -61,6 +61,18 @@ function seedPosts() {
       created: '2026-02-03T09:30:00Z',
       status: 0,
     },
+    {
+      // 待审帖（status=-1）：真实后端里新账号发帖就是这样，批准后才进列表
+      id: 900000000000000001,
+      title: '待审核：新用户发的帖',
+      content: '批准前不该出现在列表里',
+      categoryId: 1,
+      categoryName: '公告',
+      userId: 42,
+      authorName: '测试员',
+      created: '2026-02-04T09:30:00Z',
+      status: -1,
+    },
   ];
 }
 
@@ -79,8 +91,11 @@ export async function startMockForum(options = {}) {
       { id: 1, name: '公告', description: '站点公告' },
       { id: 2, name: '技术', description: '技术讨论' },
     ],
-    channels: [{ id: 1, name: '综合', type: 'general' }],
+    // CMS 栏目：真实后端 /api/channel 返回的是**扁平数组**（不分页），字段有 id/name/alias/site
+    channels: [{ id: 1, name: '综合', alias: 'general', depth: 1 }],
     enforceCooldown: false,
+    // 真实后端：新账号/未达信任阈值 → 发帖进待审（status=-1），要审核批准才公开
+    autoApprove: true,
     lastCommentAt: 0,
     requests: [],
     uploads: [],
@@ -251,15 +266,26 @@ export async function startMockForum(options = {}) {
         }
       }
 
+      // 与真实后端对齐：这一层**只回直接子级**，嵌套回复走下面 /replies
       if (pathname === '/api/bbs/comment' && method === 'GET') {
         const postId = Number(url.searchParams.get('postId'));
         const parentId = Number(url.searchParams.get('parentId') || 0);
-        const all = state.comments.filter((c) => c.postId === postId && c.status === 1);
-        const build = (pid) =>
-          all
-            .filter((c) => (c.parentId || 0) === pid)
-            .map((c) => ({ ...c, children: build(c.id) }));
-        return send(200, build(parentId));
+        const direct = state.comments
+          .filter((c) => c.postId === postId && c.status === 1 && (c.parentId || 0) === parentId)
+          .map(({ children, ...rest }) => rest); // 真实后端不回 children，嵌套由调用方拼
+        return send(200, direct);
+      }
+
+      // 与真实后端对齐：GET /api/bbs/comment/{id}/replies → { content, page }
+      if (/^\/api\/bbs\/comment\/\d+\/replies$/.test(pathname) && method === 'GET') {
+        const cid = Number(pathname.split('/')[4]);
+        const items = state.comments
+          .filter((c) => c.status === 1 && (c.parentId || 0) === cid)
+          .map(({ children, ...rest }) => rest);
+        return send(200, {
+          content: items,
+          page: { totalElements: items.length, totalPages: 1, number: 1, size: 20 },
+        });
       }
 
       if (pathname === '/api/bbs/comment' && method === 'POST') {
@@ -291,6 +317,35 @@ export async function startMockForum(options = {}) {
         return send(200, envelope({ id: comment.id, status: 1 }));
       }
 
+      if (/^\/api\/bbs\/comment\/\d+$/.test(pathname) && method === 'DELETE') {
+        if (!authed(req)) return unauth();
+        const cid = Number(pathname.split('/')[4]);
+        const idx = state.comments.findIndex((c) => c.id === cid);
+        if (idx < 0) return send(200, failure('评论不存在'));
+        const c = state.comments[idx];
+        if (c.userId !== 42) return send(403, { status: 403, message: 'Only the author can delete this comment' });
+        state.comments.splice(idx, 1);
+        return send(200, envelope({ deleted: cid }));
+      }
+
+      if (/^\/api\/bbs\/post\/\d+\/approve$/.test(pathname) && method === 'PUT') {
+        if (!authed(req)) return unauth();
+        const pid = Number(pathname.split('/')[4]);
+        const post = state.posts.find((p) => p.id === pid);
+        if (!post) return send(200, failure('帖子不存在'));
+        post.status = 1;
+        return send(200, envelope({ id: pid, status: 1 }));
+      }
+
+      if (/^\/api\/bbs\/post\/\d+$/.test(pathname) && method === 'DELETE') {
+        if (!authed(req)) return unauth();
+        const pid = Number(pathname.split('/')[4]);
+        const idx = state.posts.findIndex((p) => p.id === pid);
+        if (idx < 0) return send(200, failure('帖子不存在'));
+        state.posts.splice(idx, 1);
+        return send(200, envelope({ deleted: pid }));
+      }
+
       if (pathname === '/api/bbs/comment/my' && method === 'GET') {
         if (!authed(req)) return unauth();
         const mine = state.comments.filter((c) => c.userId === 42);
@@ -309,17 +364,18 @@ export async function startMockForum(options = {}) {
           userId: 42,
           authorName: '测试员',
           created: new Date().toISOString(),
-          status: 1,
+          status: state.autoApprove ? 1 : -1,
         };
         state.posts.push(post);
-        return send(200, envelope({ id: post.id, status: 1 }));
+        return send(200, envelope({ id: post.id, status: post.status }));
       }
 
       if (pathname === '/api/bbs/category' && method === 'GET') {
         return send(200, page(state.categories, url.searchParams));
       }
-      if (pathname === '/api/bbs/channel' && method === 'GET') {
-        return send(200, page(state.channels, url.searchParams));
+      // CMS 栏目列表（真实后端：扁平数组，不分页）
+      if (pathname === '/api/channel' && method === 'GET') {
+        return send(200, state.channels);
       }
 
       return send(404, { status: 404, message: 'no route: ' + method + ' ' + pathname });

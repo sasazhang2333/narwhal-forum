@@ -11,8 +11,11 @@ import readline from 'node:readline';
 import { TOOL_MAP, toolList } from './tools.js';
 import { ForumClient } from '../client.js';
 
+import { readFileSync } from 'node:fs';
+
 export const SERVER_NAME = 'narwhal-forum';
-export const SERVER_VERSION = '0.5.0';
+// 版本号只有一个来源：package.json
+export const SERVER_VERSION = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')).version;
 export const SUPPORTED_PROTOCOLS = ['2025-06-18', '2025-03-26', '2024-11-05'];
 export const LATEST_PROTOCOL = SUPPORTED_PROTOCOLS[0];
 
@@ -21,7 +24,10 @@ export const INSTRUCTIONS = [
   'narwhal-forum：读写 Narwhal CMS 论坛的 MCP 服务器。',
   '典型流程：list_posts 找帖 → get_post 读正文（可同时带评论）→ create_comment 评论/回复。',
   '只读操作（status/whoami/list_*/get_post/list_comments/list_categories/list_channels/search_posts）无需登录。',
-  '写操作（create_comment/create_post/react_post/my_comments）需要登录：优先用 login 工具，或在环境里提供 NARWHAL_FORUM_TOKEN。',
+  '写操作（create_comment/create_post/react_post/my_comments/approve_post/delete_comment/delete_post）需要登录：优先用 login 工具，或在环境里提供 NARWHAL_FORUM_TOKEN。',
+  '⚠️ 所有 id 都是雪花号，schema 里是 string：原样传字符串，不要转数字（超过 2^53 会丢精度，后端 404）。',
+  '⚠️ 新账号/未达信任阈值发帖会进待审（create_post 返回 status=-1，不在列表里）：有审核权限时用 approve_post 放行。',
+  '⚠️ delete_comment / delete_post 不可撤销，必须显式传 confirm=true；没拿到用户明确同意不要调用。',
   '环境变量：NARWHAL_FORUM_BASE_URL、NARWHAL_FORUM_TOKEN、NARWHAL_FORUM_REFRESH_TOKEN、NARWHAL_FORUM_USERNAME、NARWHAL_FORUM_PASSWORD。',
   '约束：评论 1-2000 字且两次之间有 15 秒冷却；标题 <=200 字，正文 <=100000 字。',
   '排序只认 order 参数（newest/hot/trending/...），后端列表端点不接受任意 sort 值。',
@@ -106,6 +112,10 @@ export class ForumMcpServer {
               content: [{ type: 'text', text: clip(out.text) }],
               isError: false,
             };
+            // 结构化结果：给 Codex / Claude Code 这类「要拿数据、不想解析中文散文」的客户端用。
+            // 没有 outputSchema 时 MCP 允许附带 structuredContent（不认识它的客户端会忽略）；
+            // 这里只在 handler 真的返回了 data 时才加，避免塞一堆 { } 进去。
+            if (out.data !== undefined && out.data !== null) payload.structuredContent = out.data;
             return ok(id, payload);
           } catch (err) {
             const text = [err && err.message ? err.message : String(err), err && err.hint ? '👉 ' + err.hint : null]

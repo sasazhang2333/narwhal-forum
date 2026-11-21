@@ -74,7 +74,8 @@ class Stdio {
   async tool(name, args = {}) {
     const res = await this.call('tools/call', { name, arguments: args });
     const text = res.result && Array.isArray(res.result.content) ? res.result.content.map((c) => c.text || '').join('') : '';
-    return { res, text, isError: Boolean(res.result && res.result.isError) };
+    const structured = (res.result && res.result.structuredContent) || {};
+    return { res, text, structured, isError: Boolean(res.result && res.result.isError) };
   }
 }
 
@@ -227,4 +228,63 @@ test('stdout 每一行都是合法 JSON（协议流未被日志污染）', () =>
   for (const line of stdio.raw) {
     assert.doesNotThrow(() => JSON.parse(line), '污染行: ' + line.slice(0, 120));
   }
+});
+
+test('tools/call create_post：待审时不说「已发布」（实测新账号发帖一律 status=-1）', async () => {
+  mock.state.autoApprove = false;
+  try {
+    const { text, structured } = await stdio.tool('create_post', {
+      categoryId: 1,
+      title: '待审提示测试',
+      content: '这条会进审核队列',
+    });
+    assert.equal(structured.status, -1);
+    assert.match(text, /待审/);
+    assert.match(text, /approve_post/);
+    assert.ok(!/已发布/.test(text), '待审不该说已发布: ' + text);
+  } finally {
+    mock.state.autoApprove = true;
+  }
+});
+
+/* ------------------------------------------- 审核 / 删除（本轮新增的三件工具） */
+
+test('tools/call approve_post：把待审帖批准为公开', async () => {
+  const before = await stdio.tool('list_posts', { page: 1, pageSize: 20 });
+  const pendingId = '900000000000000001';
+  assert.ok(!before.text.includes(pendingId), '待审帖不该出现在列表里');
+  const { text, isError, structured } = await stdio.tool('approve_post', { postId: pendingId });
+  assert.equal(isError, false, text);
+  assert.match(text, /已批准帖子/);
+  assert.equal(structured.status, 1);
+});
+
+test('tools/call delete_comment：没有 confirm=true 时拒绝执行', async () => {
+  const { text, structured } = await stdio.tool('delete_comment', { commentId: 100 });
+  assert.match(text, /confirm=true/);
+  assert.equal(structured.deleted, false);
+  // 评论还在
+  const { text: tree } = await stdio.tool('list_comments', { postId: '1' });
+  assert.match(tree, /第一条评论/);
+});
+
+test('tools/call delete_comment：confirm=true 才真的删（只能删自己的）', async () => {
+  // 先以当前账号（userId=42）发一条，再删它 —— 删别人的会被后端 403（作者本人或管理员才行）
+  const made = await stdio.tool('create_comment', { postId: '1', content: '待删评论 ' + Date.now() });
+  assert.equal(made.isError, false, made.text);
+  const commentId = made.structured.id;
+  assert.ok(commentId, '需要拿到新评论 id: ' + JSON.stringify(made.structured));
+  const { text, structured } = await stdio.tool('delete_comment', { commentId, confirm: true });
+  assert.match(text, /已删除评论/);
+  assert.equal(structured.deleted, true);
+  const { text: tree } = await stdio.tool('list_comments', { postId: '1' });
+  assert.ok(!tree.includes('待删评论'), '删掉的评论不该再出现: ' + tree);
+});
+
+test('tools/call delete_post：confirm=true 后帖子消失', async () => {
+  const { text, structured } = await stdio.tool('delete_post', { postId: '2', confirm: true });
+  assert.match(text, /已删除帖子/);
+  assert.equal(structured.deleted, true);
+  const after = await stdio.tool('list_posts', { page: 1, pageSize: 20 });
+  assert.ok(!after.text.includes('#2 '), '删掉的帖子不该再出现: ' + after.text);
 });

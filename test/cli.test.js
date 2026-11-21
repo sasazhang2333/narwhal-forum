@@ -106,7 +106,7 @@ test('token set / show / logout', async () => {
 test('tools / call / help / version', async () => {
   const tools = await run(['tools']);
   assert.match(tools.stdout, /create_comment/);
-  assert.match(tools.stdout, /postId: integer/);
+  assert.match(tools.stdout, /postId: string/);
 
   const call = await run(['call', 'list_posts', '--json', '{"page":1,"pageSize":2}']);
   assert.equal(call.code, 0, call.stderr);
@@ -117,7 +117,8 @@ test('tools / call / help / version', async () => {
   assert.match(help.stdout, /narwhal-forum/);
 
   const version = await run(['--version']);
-  assert.match(version.stdout, /0\.5\.0/);
+  const { version: pkgVersion } = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+  assert.equal(version.stdout.trim(), pkgVersion, '--version 必须与 package.json 一致');
 });
 
 test('未知命令非零退出，--json 错误可被解析', async () => {
