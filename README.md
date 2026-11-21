@@ -491,6 +491,17 @@ MCP 的 `isError` 结果正文里附同样的清单、并放进 `structuredConte
 其它已验证的边界：无效 token → `🔒 未登录或登录已过期（HTTP 401）`；评论 15 秒冷却原样透出；
 删除不存在的 id → `BbsPost not found. ID = <id>（HTTP 404 …）`；不带 `confirm` 的删除在插件层就被拦下（不碰后端）。
 
+### 8.0.1 凭据热重载：CLI 登录完，不用重启宿主
+
+MCP server 启动时会把配置/凭据快照到内存（`src/mcp/server.js` 构造 `ForumClient` 那一刻）。
+所以「先 `narwhal-forum login`、再让已经跑着的 dsh 用新登录」原本是**不生效**的 —— 得重启整个宿主。
+现在补了一次磁盘重读：请求 401 → 刷新失败（例如 `SESSION_KICKED`）→ 重读
+`~/.config/narwhal-forum/credentials.json`，只有当文件里的 access token 与本进程持有的不同才切换，
+然后用新 token 重放**一次**（`#reloadCredentialsOnce()`，绝不循环）。
+
+判据（`test/client.test.js`）：进程里塞一个过期 token、磁盘上是新 token → `whoami()` 仍应返回真实用户名，
+且 `client.token` 已被换成磁盘上的那个。
+
 ### 8.1 真实后端实测踩到的 5 个坑（都已修，附成因）
 
 这些不是「理论上可能」，是本轮连真后端时**实际把功能跑坏**的东西：

@@ -118,13 +118,20 @@ export class ForumMcpServer {
             if (out.data !== undefined && out.data !== null) payload.structuredContent = out.data;
             return ok(id, payload);
           } catch (err) {
-            const text = [err && err.message ? err.message : String(err), err && err.hint ? '👉 ' + err.hint : null]
-              .filter(Boolean)
-              .join('\n');
             const blocked = Array.isArray(err && err.blockers) ? err.blockers : null;
-            const extra = blocked
-              ? '\n\n' + blocked.map((b) => '- ' + (b.title || b.code || '待办') + (b.actionLabel ? '（' + b.actionLabel + '）' : '') + (b.actionTo ? '：' + b.actionTo : '')).join('\n')
-              : '';
+            // 有 blockers 就逐条列（带「去哪解决」的路径）并**跳过**压成一句的 hint，
+            // 否则同一句话会出现两遍（hint 和第一条 blocker 内容相同）。
+            const lines = [err && err.message ? err.message : String(err)];
+            if (blocked) {
+              for (const b of blocked) {
+                if (!b || typeof b !== 'object') continue;
+                lines.push('- ' + (b.title || b.code || '待办') + (b.actionLabel ? '（' + b.actionLabel + '）' : '') + (b.actionTo ? '：' + b.actionTo : ''));
+              }
+            } else if (err && err.hint) {
+              lines.push('👉 ' + err.hint);
+            }
+            const text = lines.join('\n');
+            const extra = '';
             return ok(id, {
               content: [{ type: 'text', text: clip(text + extra) }],
               isError: true,

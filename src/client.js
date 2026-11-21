@@ -7,7 +7,7 @@
  *  - 401 自动用 refresh token 续期一次并重放请求。
  *  - 写操作前用 ensureAuth() 给出人能看懂的引导，而不是抛 401 原文。
  */
-import { resolveConfig, patchCredentials, maskToken } from './config.js';
+import { resolveConfig, readCredentials, patchCredentials, maskToken } from './config.js';
 import { buildEncryptedLogin } from './crypto.js';
 import { buildMultipart, describeImage, pickUploadedUrl, absoluteImageUrl, resolveImageList, contentWithImages } from './images.js';
 
@@ -216,13 +216,41 @@ export class ForumClient {
       try {
         await this.refresh();
       } catch (err) {
-        throw new ForumAuthError('access token 已过期且刷新失败：' + err.message, {
-          hint: '重新运行 narwhal-forum login。',
-        });
+        // 另一个进程（CLI）刚登录过 → 磁盘上的凭据已经是新的，只是本进程还握着旧的。
+        // MCP server 启动时快照配置，若不在这里重读，用户「先 CLI login 再让 harness 用」
+        // 就必须重启整个宿主进程才能恢复（真机踩到过）。这里只重读一次，绝不死循环。
+        const reloaded = this.#reloadCredentialsOnce();
+        if (!reloaded) {
+          throw new ForumAuthError('access token 已过期且刷新失败：' + err.message, {
+            hint: '运行 narwhal-forum login 重新登录（凭据写在 ~/.config/narwhal-forum/credentials.json）。',
+          });
+        }
+        res = await this.#raw(pathname, { ...opts, _retried: true });
+        return this.#finish(res, ctx);
       }
       res = await this.#raw(pathname, { ...opts, _retried: true });
     }
     return this.#finish(res, ctx);
+  }
+
+  /**
+   * 刷新失败时重读磁盘凭据：只有当文件里的 token 与本进程持有的不同才切换（返回 true）。
+   * 只允许一次，避免「文件没变 → 无限重试」。
+   */
+  #reloadCredentialsOnce() {
+    if (this._reloadedFromDisk) return false;
+    this._reloadedFromDisk = true;
+    let disk = null;
+    try {
+      disk = readCredentials();
+    } catch {
+      return false;
+    }
+    const accessToken = disk && (disk.accessToken || disk.token);
+    if (!accessToken || accessToken === this.token) return false;
+    this.token = accessToken;
+    this.refreshToken = disk.refreshToken || null;
+    return true;
   }
 
   #rememberTokens(tokens) {

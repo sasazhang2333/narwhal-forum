@@ -215,3 +215,39 @@ test('createComment 被门禁拦下：ForumError 带 blockers 与可执行 hint'
     mock.state.gateComment = null;
   }
 });
+
+/* ------------------------------------------- 凭据热重载（CLI 登录后不重启宿主也能恢复） */
+
+test('refresh 被踢时重读磁盘凭据并重试一次（MCP 进程不必重启）', async () => {
+  const fs = await import('node:fs');
+  const os = await import('node:os');
+  const path = await import('node:path');
+  const { ForumClient } = await import('../src/client.js');
+
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'narwhal-reload-'));
+  const prev = process.env.NARWHAL_FORUM_HOME;
+  process.env.NARWHAL_FORUM_HOME = home;
+  try {
+    // 磁盘上是「刚刚 CLI login 过」的新凭据
+    fs.writeFileSync(path.join(home, 'credentials.json'), JSON.stringify({
+      baseUrl: mock.baseUrl,
+      accessToken: ACCESS_TOKEN,
+      refreshToken: REFRESH_TOKEN,
+    }));
+
+    // 进程里握着的是旧的（启动时快照的）凭据
+    const client = new ForumClient({
+      baseUrl: mock.baseUrl,
+      token: 'stale-token-from-startup',
+      refreshToken: 'stale-refresh',
+      persist: false,
+    });
+    const me = await client.whoami();
+    assert.equal(me.user.userName, 'tester', '应已用磁盘上的新 token 重试成功');
+    assert.equal(client.token, ACCESS_TOKEN);
+  } finally {
+    if (prev === undefined) delete process.env.NARWHAL_FORUM_HOME;
+    else process.env.NARWHAL_FORUM_HOME = prev;
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
