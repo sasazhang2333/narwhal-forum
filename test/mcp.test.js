@@ -133,7 +133,10 @@ test('tools/list 暴露完整能力表且 schema 合法', async () => {
     assert.ok(t.description.length > 10, t.name + ' 的 description 太短');
   }
   const comment = tools.find((t) => t.name === 'create_comment');
-  assert.deepEqual(comment.inputSchema.required, ['postId', 'content']);
+  // content 不再是必填：纯图片评论可以只给 images（正文由 client 校验「至少要有正文或图片」）。
+  assert.deepEqual(comment.inputSchema.required, ['postId']);
+  assert.equal(comment.inputSchema.properties.images.type, 'array');
+  assert.ok(tools.some((t) => t.name === 'upload_image'), '应暴露 upload_image');
 });
 
 test('tools/call status：不泄露明文 token', async () => {

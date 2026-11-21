@@ -83,17 +83,47 @@ export async function startMockForum(options = {}) {
     enforceCooldown: false,
     lastCommentAt: 0,
     requests: [],
+    uploads: [],
   };
 
   const { publicKey, privateKey } = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
   const publicKeyPem = publicKey.export({ type: 'spki', format: 'pem' }).toString();
 
-  function readBody(req) {
+  function readRawBody(req) {
     return new Promise((resolve) => {
       const chunks = [];
       req.on('data', (c) => chunks.push(c));
-      req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+      req.on('end', () => resolve(Buffer.concat(chunks)));
     });
+  }
+
+  function readBody(req) {
+    return readRawBody(req).then((buf) => buf.toString('utf8'));
+  }
+
+  /** 极简 multipart 解析：只取第一个文件的 filename / content-type / 字节数。 */
+  function parseFirstFile(buf, contentType) {
+    const m = /boundary=(?:"([^"]+)"|([^;]+))/i.exec(String(contentType || ''));
+    if (!m) return null;
+    const boundary = '--' + (m[1] || m[2]).trim();
+    const text = buf.toString('latin1');
+    const start = text.indexOf(boundary);
+    if (start < 0) return null;
+    const headerEnd = text.indexOf('\r\n\r\n', start);
+    if (headerEnd < 0) return null;
+    const headers = text.slice(start, headerEnd);
+    const nameMatch = /name="([^"]*)"/i.exec(headers);
+    const fileMatch = /filename="([^"]*)"/i.exec(headers);
+    const typeMatch = /Content-Type:\s*([^\r\n]+)/i.exec(headers);
+    const bodyStart = headerEnd + 4;
+    const nextBoundary = text.indexOf('\r\n' + boundary, bodyStart);
+    const bodyEnd = nextBoundary < 0 ? text.length : nextBoundary;
+    return {
+      field: nameMatch ? nameMatch[1] : null,
+      filename: fileMatch ? fileMatch[1] : null,
+      contentType: typeMatch ? typeMatch[1].trim() : null,
+      bytes: bodyEnd - bodyStart,
+    };
   }
 
   function authed(req) {
@@ -124,7 +154,8 @@ export async function startMockForum(options = {}) {
     const url = new URL(req.url, 'http://' + (req.headers.host || '127.0.0.1'));
     const pathname = url.pathname;
     const method = req.method || 'GET';
-    const body = await readBody(req);
+    const rawBuf = await readRawBody(req);
+    const body = rawBuf.toString('utf8');
     state.requests.push({ method, pathname, query: url.search });
 
     const send = (status, payload, headers = {}) => {
@@ -162,6 +193,17 @@ export async function startMockForum(options = {}) {
         const user = { userId: 42, userName: 'tester', nickName: '测试员' };
         if (state.realname !== undefined && state.realname !== null) user.verifiedType = state.realname;
         return send(200, envelope({ user, roles: ['USER'], permissions: ['bbs:comment'] }));
+      }
+
+      if (pathname === '/api/upload/image-upload' && method === 'POST') {
+        if (!authed(req)) return unauth();
+        const file = parseFirstFile(rawBuf, req.headers['content-type']);
+        if (!file || !file.filename) return send(400, { status: 400, message: '缺少文件字段 file' });
+        if (!/^image\//.test(String(file.contentType || ''))) return send(400, { status: 400, message: '不是图片' });
+        const safeName = String(file.filename).replace(/[^A-Za-z0-9._-]/g, '_');
+        const fileUrl = '/uploads/mock/' + Date.now() + '-' + safeName;
+        state.uploads.push({ ...file, scene: url.searchParams.get('scene') || null, url: fileUrl });
+        return send(200, envelope({ url: fileUrl, webpUrl: fileUrl, size: file.bytes }));
       }
 
       if (pathname === '/api/bbs/post' && method === 'GET') {
@@ -301,6 +343,7 @@ export async function startMockForum(options = {}) {
       state.enforceCooldown = false;
       state.lastCommentAt = 0;
       state.requests = [];
+      state.uploads = [];
     },
     async close() {
       await new Promise((resolve) => server.close(resolve));

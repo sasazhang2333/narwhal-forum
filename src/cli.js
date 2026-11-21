@@ -11,9 +11,10 @@ import { ForumClient, ForumError, ForumAuthError, REACTIONS, POST_ORDERS } from 
 import { clearCredentials, patchCredentials, readCredentials, resolveConfig } from './config.js';
 import { createDraft, readDraft, listDrafts, removeDraft, approveDraft, rejectDraft, verifyApprovalToken, markPublished, summarizeDrafts } from './draft.js';
 import { RISK_VERSION, RISK_ITEMS, riskNoticeText, riskSummaryText, riskAcknowledged, riskConsentPatch } from './risk.js';
+import { resolveImageList, verifyDraftImages, summarizeImages, contentWithImages, ImageError } from './images.js';
 import { TOOLS, TOOL_MAP } from './mcp/tools.js';
 
-const VERSION = '0.4.0';
+const VERSION = '0.5.0';
 
 const HELP = [
   'narwhal-forum ' + VERSION + ' — Narwhal CMS 论坛能力包（CLI + MCP server）',
@@ -39,9 +40,13 @@ const HELP = [
   '  my-comments            我发过的评论（需登录）',
   '',
   '写入:',
-  '  new-comment <postId> --content <文本|-> [--parent <id>]   发表评论/回复',
-  '  new-post --category <id> --title <t> --content <文本|@文件|->   发帖',
+  '  new-comment <postId> --content <文本|-> [--parent <id>] [--image 图.png ...]   发表评论/回复',
+  '  new-post --category <id> --title <t> --content <文本|@文件|-> [--image 图.png ...]   发帖',
+  '  upload-image <图.png> [--scene chat]                     先上传图片，拿可直接内联的 URL',
   '  react <postId> [--emoji 👍]                               表情互动',
+  '',
+  '图片: --image 可重复给多张（最多 9 张），发布时自动上传并把 ![](url) 内联到正文末尾；',
+  '      草稿模式下只记本机路径 + sha256，发布前重新校验，防止「批准 A 发布 B」。',
   '',
   '集成:',
   '  mcp                    以 MCP stdio 服务器运行（dsh / Claude Code / Codex 用）',
@@ -57,6 +62,20 @@ const HELP = [
 
 const GLOBAL_FLAGS = new Set(['base-url', 'token', 'refresh-token', 'username', 'password', 'timeout', 'json', 'debug', 'help', 'version', 'verbose', 'browser', 'timeout-sec', 'keep-browser', 'mode', 'yes', 'accept-risk']);
 
+/** 可重复出现的选项：--image a.png --image b.png → 数组。 */
+const MULTI_FLAGS = new Set(['image', 'images']);
+
+/** 写一个 flag，多值选项累积成数组（其余保持单值语义，覆盖式）。 */
+function setFlag(flags, key, value) {
+  if (!MULTI_FLAGS.has(key)) {
+    flags[key] = value;
+    return;
+  }
+  if (flags[key] === undefined) flags[key] = value;
+  else if (Array.isArray(flags[key])) flags[key].push(value);
+  else flags[key] = [flags[key], value];
+}
+
 function parseArgv(argv) {
   const flags = {};
   const positionals = [];
@@ -70,17 +89,17 @@ function parseArgv(argv) {
     if (arg.startsWith('--')) {
       const eq = arg.indexOf('=');
       if (eq > 2) {
-        flags[arg.slice(2, eq)] = arg.slice(eq + 1);
+        setFlag(flags, arg.slice(2, eq), arg.slice(eq + 1));
         i += 1;
         continue;
       }
       const key = arg.slice(2);
       const next = argv[i + 1];
       if (next === undefined || (next.startsWith('--') && next.length > 2)) {
-        flags[key] = true;
+        setFlag(flags, key, true);
         i += 1;
       } else {
-        flags[key] = next;
+        setFlag(flags, key, next);
         i += 2;
       }
       continue;
@@ -125,8 +144,9 @@ const COMMANDS = {
   channels: { tool: 'list_channels', map: { page: 'page', 'page-size': 'pageSize' }, ints: ['page', 'pageSize'] },
   search: { tool: 'search_posts', positional: ['q'], map: { category: 'categoryId', user: 'userId', 'date-from': 'dateFrom', 'date-to': 'dateTo', sort: 'sort', page: 'page', 'page-size': 'pageSize' }, ints: ['categoryId', 'userId', 'page', 'pageSize'] },
   'my-comments': { tool: 'my_comments', map: { page: 'page', 'page-size': 'pageSize' }, ints: ['page', 'pageSize'] },
-  'new-comment': { tool: 'create_comment', positional: ['postId'], map: { content: 'content', parent: 'parentId', 'reply-user': 'replyUserId', whisper: 'whisper' }, ints: [] },
-  'new-post': { tool: 'create_post', map: { category: 'categoryId', title: 'title', content: 'content', summary: 'summary', type: 'type', cover: 'cover' }, ints: ['categoryId'] },
+  'new-comment': { tool: 'create_comment', positional: ['postId'], map: { content: 'content', parent: 'parentId', 'reply-user': 'replyUserId', whisper: 'whisper', image: 'images' }, ints: [] },
+  'new-post': { tool: 'create_post', map: { category: 'categoryId', title: 'title', content: 'content', summary: 'summary', type: 'type', cover: 'cover', image: 'images' }, ints: ['categoryId'] },
+  'upload-image': { tool: 'upload_image', positional: ['path'], map: { scene: 'scene' }, ints: [] },
   react: { tool: 'react_post', positional: ['postId'], map: { emoji: 'emoji' }, ints: [] },
   whoami: { tool: 'whoami' },
   status: { tool: 'status' },
@@ -342,11 +362,12 @@ async function cmdRisk(flags) {
 
 function draftSummaryLine(record) {
   const p = record.payload || {};
+  const imgs = Array.isArray(p.images) && p.images.length ? '  [图 ' + p.images.length + ']' : '';
   if (record.kind === 'comment') {
     const target = '帖子 #' + p.postId + (p.parentId ? ' 的评论 #' + p.parentId : '');
-    return '评论 → ' + target + '：' + String(p.content || '').replace(/\s+/g, ' ').slice(0, 60);
+    return '评论 → ' + target + '：' + String(p.content || '').replace(/\s+/g, ' ').slice(0, 60) + imgs;
   }
-  return '发帖 → ' + (p.title || '(无标题)') + ' @ 分类 ' + (p.categoryId === undefined ? '?' : p.categoryId);
+  return '发帖 → ' + (p.title || '(无标题)') + ' @ 分类 ' + (p.categoryId === undefined ? '?' : p.categoryId) + imgs;
 }
 
 function draftView(record) {
@@ -363,6 +384,11 @@ function draftView(record) {
     lines.push('  标题: ' + (p.title || ''));
     lines.push('  正文:');
     lines.push('  ' + String(p.content || '').split('\n').join('\n  '));
+  }
+  const images = Array.isArray(p.images) ? p.images : [];
+  if (images.length) {
+    lines.push('  图片（发布时上传并内联到正文末尾）:');
+    for (const line of summarizeImages(images)) lines.push('    ' + line);
   }
   if (record.review) {
     lines.push('  审阅: ' + record.review.decision + ' @ ' + record.review.at + (record.review.note ? '（' + record.review.note + '）' : ''));
@@ -412,12 +438,30 @@ async function draftPublish(record, token, flags) {
   }
 
   const p = record.payload || {};
+  // 图片：先校验（文件还在、sha256 与批准时一致），再逐张上传，最后把 markdown 内联进正文。
+  // 本地前置条件失败（缺文件 / 指纹不一致）算用法错误 exit 2；网络或论坛失败 exit 1。两种都不消费 token。
+  let uploaded = [];
+  let content = p.content;
+  try {
+    const images = verifyDraftImages(p.images);
+    uploaded = images.length ? await client.uploadImages(images) : [];
+    content = contentWithImages(p.content, uploaded.map((u) => u.url));
+  } catch (err) {
+    const local = err instanceof ImageError || (err && err.name === 'ImageError');
+    process.stderr.write('✗ 图片准备失败，token 未消费（有效期内可重试）：' + (err && err.message ? err.message : String(err)) + '\n');
+    if (err && err.hint) process.stderr.write('   ' + err.hint + '\n');
+    return local ? 2 : 1;
+  }
+  if (record.kind === 'comment' && content.length > 2000) {
+    process.stderr.write('✗ 带图后评论正文超过 2000 字上限（当前 ' + content.length + ' 字），token 未消费\n');
+    return 2;
+  }
   let result;
   try {
     if (record.kind === 'comment') {
-      result = await client.createComment({ postId: p.postId, content: p.content, parentId: p.parentId, replyUserId: p.replyUserId, whisper: p.whisper });
+      result = await client.createComment({ postId: p.postId, content, parentId: p.parentId, replyUserId: p.replyUserId, whisper: p.whisper });
     } else {
-      result = await client.createPost({ title: p.title, content: p.content, categoryId: p.categoryId, summary: p.summary, type: p.type, cover: p.cover });
+      result = await client.createPost({ title: p.title, content, categoryId: p.categoryId, summary: p.summary, type: p.type, cover: p.cover });
     }
   } catch (err) {
     process.stderr.write('✗ 发布请求失败，token 未消费（有效期内可重试）：' + (err && err.message ? err.message : String(err)) + '\n');
@@ -434,6 +478,7 @@ async function draftPublish(record, token, flags) {
     '已发布 ✔',
     '  草稿: ' + record.id + '（token 已消费，不可重放）',
     '  结果 id: ' + (resultId === undefined ? '（后端未返回 id）' : resultId),
+    ...(uploaded.length ? ['  图片: ' + uploaded.length + ' 张已上传并内联（' + uploaded.map((u) => u.url).join(' ') + '）'] : []),
     '  实名: ' + (realname.verified === true ? '已实名' : '本地未判定，以服务端结果为准'),
   ].join('\n') + '\n');
   return 0;
@@ -445,7 +490,7 @@ async function cmdDraft(sub, flags, rest) {
   const fail = (s) => process.stderr.write('✗ ' + s + '\n');
 
   if (action === 'help' || flags.help === true) {
-    out("草稿与人审发布（AI 不能自行发布）：\n  draft new-comment <postId> --content <文本|@文件|-> [--parent <id>]\n  draft new-post --category <id> --title <标题> --content <文本|@文件|-> [--summary <摘要>]\n  draft list [--status pending_review|approved|published|rejected|expired] [--json]\n  draft show <id> [--json]\n  draft approve <id>      只在你的终端里：展示全文 → 输入 yes → 打印一次性 approvalToken（10 分钟）\n  draft reject <id> [--reason <说明>]\n  draft publish <id> --token <approvalToken>    发布前重新校验实名；token 一次性\n  draft discard <id>      删除本地草稿文件\n\n发布只接受 approvalToken，没有 --yes / --force 可绕过；MCP 侧没有 approve 工具。");
+    out("草稿与人审发布（AI 不能自行发布）：\n  draft new-comment <postId> --content <文本|@文件|-> [--parent <id>] [--image 图.png ...]\n  draft new-post --category <id> --title <标题> --content <文本|@文件|-> [--summary <摘要>] [--image 图.png ...]\n  draft list [--status pending_review|approved|published|rejected|expired] [--json]\n  draft show <id> [--json]\n  draft approve <id>      只在你的终端里：展示全文 → 输入 yes → 打印一次性 approvalToken（10 分钟）\n  draft reject <id> [--reason <说明>]\n  draft publish <id> --token <approvalToken>    发布前重新校验实名；token 一次性\n  draft discard <id>      删除本地草稿文件\n\n发布只接受 approvalToken，没有 --yes / --force 可绕过；MCP 侧没有 approve 工具。");
     return 0;
   }
 
@@ -464,6 +509,8 @@ async function cmdDraft(sub, flags, rest) {
         : { title: String(flags.title), content: content, categoryId: Number(flags.category) };
       if (action === 'new-comment' && flags.parent !== undefined) payload.parentId = Number(flags.parent);
       if (action === 'new-post' && flags.summary !== undefined) payload.summary = String(flags.summary);
+      const images = resolveImageList(flags.image);
+      if (images.length) payload.images = images.map((img) => ({ path: img.path, name: img.name, mime: img.mime, bytes: img.bytes, sha256: img.sha256 }));
       const record = createDraft({ kind: action === 'new-comment' ? 'comment' : 'post', payload, author, baseUrl: client.baseUrl });
       if (flags.json) { out(JSON.stringify(record, null, 2)); return 0; }
       out(draftView(record));
@@ -518,7 +565,7 @@ async function cmdDraft(sub, flags, rest) {
     fail('未知子命令: draft ' + action + '（试 narwhal-forum draft help）');
     return 2;
   } catch (err) {
-    if (err && err.name === 'DraftError') {
+    if (err && (err.name === 'DraftError' || err.name === 'ImageError')) {
       fail(err.message + (err.hint ? '\n  ' + err.hint : ''));
       return 2;
     }
@@ -674,12 +721,13 @@ export async function main(argv = process.argv.slice(2)) {
     return 2;
   } catch (err) {
     const isAuth = err instanceof ForumAuthError;
+    const isImage = err instanceof ImageError || (err && err.name === 'ImageError');
     const prefix = isAuth ? '🔒 ' : '✗ ';
     process.stderr.write(prefix + (err && err.message ? err.message : String(err)) + '\n');
     if (err && err.hint) process.stderr.write('   ' + err.hint + '\n');
     if (flags.json && err) process.stdout.write(JSON.stringify({ error: err.name, message: err.message, code: err.code, hint: err.hint }, null, 2) + '\n');
     if (err instanceof ForumError && err.detail && flags.verbose) process.stderr.write('   detail: ' + JSON.stringify(err.detail).slice(0, 2000) + '\n');
-    return 1;
+    return isImage ? 2 : 1;
   }
 }
 

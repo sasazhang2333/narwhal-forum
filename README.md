@@ -103,8 +103,9 @@ narwhal-forum whoami
 | `categories` / `channels` | 分类 / 频道 | 否 |
 | `search <关键词>` | 全文搜索（后端 Lucene） | 否 |
 | `my-comments` | 我发过的评论 | 是 |
-| `new-comment <postId> --content <文本|->` | 发表评论 / 回复（`--parent` 指定父评论） | 是 |
-| `new-post --category <id> --title <t> --content <文本|@file|->` | 发帖 | 是 |
+| `new-comment <postId> --content <文本|-> [--image 图.png]` | 发表评论 / 回复（`--parent` 指定父评论；`--image` 可重复，见 4.4） | 是 |
+| `new-post --category <id> --title <t> --content <文本|@file|-> [--image 图.png]` | 发帖 | 是 |
+| `upload-image <图.png> [--scene chat]` | 单独上传一张图，返回可写进 markdown 的 URL | 是 |
 | `react <postId> [--emoji 👍]` | 表情互动 | 是 |
 | `draft <子命令>` | **人审发布**：`new-comment` `new-post` `list` `show` `approve` `reject` `publish` `discard`（见 4.3） | 视子命令 |
 | `mcp` | 以 MCP stdio server 运行 | — |
@@ -112,6 +113,7 @@ narwhal-forum whoami
 | `call <tool> --json '<参数 JSON>'` | 直接调用任意能力（逃生舱） | 视工具 |
 
 `--content` 支持三种来源：字符串、`@文件路径`、`-`（stdin）。
+`--image` 可重复（`--image a.png --image b.png`），也接受逗号分隔；上限 9 张。
 
 ```bash
 echo '从 stdin 来的正文' | narwhal-forum new-comment 42 --content -
@@ -212,6 +214,40 @@ narwhal-forum draft publish drf-1a2b3c4d --token nfap_…   # 持 token 才能�
 
 草稿与批准密钥落在 `~/.config/narwhal-forum/`（目录 `0700`、文件 `0600`）：`drafts/<id>.json` 存正文与状态，`approval.key` 存 HMAC 密钥（首次批准时生成）。
 
+### 4.4 图片评论（`--image`）
+
+评论正文是普通字符串，前端用 marked + DOMPurify 渲染（`<img>` 放行），所以**图片不占数据库字段**：
+先把图传到论坛的上传接口拿 URL，再以 markdown `![](url)` 内联进正文。这条路径**不需要改 narwhal-cms 一行代码**。
+
+```bash
+# 一条评论带两张图（图先上传，再内联）
+narwhal-forum new-comment 42 --content '复现步骤见下图' --image ./step1.png --image ./step2.png
+
+# 发帖带图
+narwhal-forum new-post --category 3 --title '报个 bug' --content @body.md --image ./shot.png
+
+# 只想先拿一个 URL（比如自己拼正文）
+narwhal-forum upload-image ./shot.png --json    # → {"url":"http://…/uploads/2026/11/xxx.webp", …}
+```
+
+走的接口就是网页端粘贴上传的那一条：`POST /api/upload/image-upload`（multipart，字段名 `file`，
+`@PreAuthorize("isAuthenticated()")`）。**压缩、水印、图片内容审核都在上传时由后端完成**，所以：
+
+| 规则 | 值 | 说明 |
+| --- | --- | --- |
+| 单张上限 | 10MB | 客户端先挡一层，免得白传 |
+| 每条上限 | 9 张 | 再多没有阅读价值 |
+| 格式 | png / jpg / jpeg / gif / webp / bmp / avif | 按扩展名推断 Content-Type |
+| 审核 | 后端 `ImageModerationProvider` | 命中敏感图直接返回 400，**评论不会发出** |
+| 场景 | `--scene chat` | 私信/聊天类内容传 `chat`，文件会被登记为私密 |
+
+草稿带图时，草稿里只存**本地路径 + sha256**（不联网、不上传）；`draft_publish` 会**先重新校验文件指纹**：
+文件被删 → `E_IMAGE_MISSING`；内容变了 → `E_IMAGE_CHANGED`。两种情况都在上传前失败，**token 不消费**，
+所以「人批准的是这张图，发出去的就必须是这张图」。
+
+> 为什么不做「后端加 `images_` 列」：评论正文已经是 markdown，加列等于把同一份信息存两处，
+> 还要改实体、迁移、DTO 与前端渲染；内联方案的渲染路径（`BbsMarkdown.vue`）本来就存在。
+
 ---
 
 ## 5. 接入各工具
@@ -241,6 +277,52 @@ narwhal-forum setup
 | `npm i -g --prefix ~/.local .`（默认配置） | `narwhal-forum` / `[mcp]` |
 | 已发布到 npm，想用 npx | `npx` / `[-y, narwhal-forum, mcp]` |
 | 不装全局，源码直跑 | `node` / `[<包目录>/bin/narwhal-forum.js, mcp]`（见 `examples/cordis.local.patch.yml`） |
+| **dsh 桌面端（app）** | 见下面 5.1：桌面进程的 PATH 里没有 node，必须 [REDACTED_STREET_411] |
+
+### 5.1 dsh 桌面端：PATH 里没有 node（必读）
+
+dsh 桌面版（Electron 打包的 app）**不继承你的 shell PATH**，它的进程环境只有
+`/usr/bin:/bin:/usr/sbin:/sbin`。可以自己确认：
+
+```bash
+ps eww -p $(pgrep -f 'DeepSeek Harness' | head -1) | tr ' ' '\n' | grep '^PATH='
+# → PATH=/usr/bin:/bin:/usr/sbin:/sbin
+```
+
+于是 `command: narwhal-forum`、`npx`、甚至 `node`（nvm 装的）**全都解析不到**。
+而 `failOnStartupError: false` 会让这种失败**静默发生**：[REDACTED_STREET_412]，看起来像「插件没装」。
+
+解法：给它一个绝对路径的启动器（一个 20 行的 sh 脚本，自己找 node，与 nvm 版本解耦）。
+
+```bash
+# 1) 安装启动器（仓库自带）
+mkdir -p ~/.dsh/bin
+cp examples/narwhal-forum-mcp ~/.dsh/bin/narwhal-forum-mcp
+chmod +x ~/.dsh/bin/narwhal-forum-mcp
+
+# 2) 在 profile 的 cordis.patch.yml 里按 id 覆写那一行
+#    （模板：examples/cordis.desktop.patch.yml）
+```
+
+```yaml
+- id: narwhal-forum-mcp            # 必须与包内 cordis.patch.yml 的 id 一致，否则是「新增一行」而不是「改这一行」
+  name: '@deepseek-ai/dsh-mcp-client'
+  config:                          # ⚠️ config 整体替换、不深合并：所有字段都得重述
+    serverName: narwhal-forum
+    transport: stdio
+    command: /Users/<you>/.dsh/bin/narwhal-forum-mcp
+    args: []
+    toolCallTimeoutMs: 60000
+    failOnStartupError: true       # 桌面端建议 true：起不来就报错，而不是静默少一批工具
+    reconnect: { enabled: true, initialDelayMs: 500, maxDelayMs: 30000, maxAttempts: 10 }
+```
+
+改完**重启 dsh 应用**才会生效；重启后 `mcp__narwhal-forum__*` 才会出现在工具列表里。
+验证：`cordis_inspect_query` 查 `@deepseek-ai/dsh-mcp-client`，应能看到 `patchId: narwhal-forum-mcp` 这一行；
+或者直接让 Agent 调 `mcp__narwhal-forum__status`。
+
+> 不想用启动器也可以写死 node 绝对路径（`command: /Users/<you>/.nvm/versions/node/v24.14.0/bin/node`，
+> `args: [<profile>/node_modules/narwhal-forum/bin/narwhal-forum.js, mcp]`），代价是 nvm 换版本时要改这一行。
 
 ### Claude Code
 
@@ -291,10 +373,11 @@ NARWHAL_FORUM_BASE_URL = "http://127.0.0.1:8080"
 | `list_channels` | 频道 | `page` `pageSize` | ✅ | 否 |
 | `search_posts` | 搜索 | `q` `categoryId` `userId` `dateFrom` `dateTo` `sort` `page` `pageSize` | ✅ | 否 |
 | `my_comments` | 我的评论 | `page` `pageSize` | ✅ | 是 |
-| `create_comment` | 发表评论 | `postId` `content` `parentId?` `replyUserId?` `whisper?` | ❌ | 是 |
-| `create_post` | 发帖 | `categoryId` `title` `content` `summary?` `type?` `cover?` | ❌ | 是 |
+| `create_comment` | 发表评论 | `postId` `content` `parentId?` `replyUserId?` `whisper?` `images?` | ❌ | 是 |
+| `create_post` | 发帖 | `categoryId` `title` `content` `summary?` `type?` `cover?` `images?` | ❌ | 是 |
+| `upload_image` | 上传一张图，返回 URL | `path` `scene?` | ❌ | 是 |
 | `react_post` | 表情互动 | `postId` `emoji` | ❌ | 是 |
-| `draft_create` | 落本地草稿（**不发出去**） | `kind` `content` `postId?` `parentId?` `replyUserId?` `whisper?` `categoryId?` `title?` `summary?` | ❌（不联网） | 否 |
+| `draft_create` | 落本地草稿（**不发出去**） | `kind` `content` `postId?` `parentId?` `replyUserId?` `whisper?` `categoryId?` `title?` `summary?` `images?` | ❌（不联网） | 否 |
 | `draft_list` | 草稿列表 | `status?` | ✅ | 否 |
 | `draft_get` | 单条草稿 | `draftId` | ✅ | 否 |
 | `draft_discard` | 丢弃草稿 | `draftId` | ❌ | 否 |
@@ -302,6 +385,7 @@ NARWHAL_FORUM_BASE_URL = "http://127.0.0.1:8080"
 
 `order` 取值：`newest` `hot` `trending` `unanswered` `following` `most-collected` `best-all-time` `on-this-day`。
 `emoji` 白名单：👍 ❤️ 😂 🎉 🤔 😮 😢 🚀。
+`images` 是**本地文件路径数组**（最多 9 张）：工具内部先上传再内联 markdown，调用方不需要自己拼 URL。
 
 ---
 
@@ -323,8 +407,9 @@ NARWHAL_FORUM_BASE_URL = "http://127.0.0.1:8080"
 
 ## 8. 已知限制
 
-- **未实现**：附件 / 图片上传、通知、私信、收藏与关注列表（后端有接口但未纳入本包；`call` 逃生舱可临时补位）。
-- **验证边界**：78 个用例跑在进程内 mock 后端（同一套契约）；真实论坛的端到端验证需要 narwhal-cms 后端在 `8080` 运行。浏览器授权把「开浏览器 + 取 token」抽成可注入的取值函数来测，真实弹窗需要人工验证一次。
+- **已支持**：图片（评论/发帖内联，见 4.4）。
+- **未实现**：非图片附件、通知、私信、收藏与关注列表（后端有接口但未纳入本包；`call` 逃生舱可临时补位）。
+- **验证边界**：93 个用例跑在进程内 mock 后端（同一套契约）；真实论坛的端到端验证需要 narwhal-cms 后端在 `8080` 运行。浏览器授权把「开浏览器 + 取 token」抽成可注入的取值函数来测，真实弹窗需要人工验证一次。
 - **待确认**：GitHub 私有仓库名与归属账号、是否发布到 npm 私有源。
 - 论坛若开启验证码 / 双因素登录：**网页授权天然通过**（人就在真浏览器里）；只有 `login --password` 会返回 `CAPTCHA_REQUIRED` / `TWO_FACTOR_REQUIRED`。
 - 浏览器授权依赖 Chromium 系浏览器（Chrome / Edge / Brave / Chromium）；Safari / Firefox 不支持，需 `--password` 或 `token set`。
@@ -341,22 +426,23 @@ narwhal-forum/
 │   ├── auth.js              # 浏览器授权登录 / 撤销 / 状态（CDP 读 token）
 │   ├── crypto.js            # RSA + AES 登录加密
 │   ├── config.js            # 配置解析 + 凭据文件
+│   ├── images.js            # 图片校验 / multipart 拼装 / markdown 内联
 │   ├── cli.js               # 命令行
 │   ├── index.js             # 库导出
 │   └── mcp/
 │       ├── server.js        # 手写 MCP stdio JSON-RPC server
-│       └── tools.js         # 14 个能力定义与渲染
+│       └── tools.js         # 20 个能力定义与渲染
 ├── cordis.patch.yml         # dsh 插件接线
 ├── locale/{en,zh}.json      # dsh 插件文案
 ├── icon.svg
 ├── examples/                # Claude Code / Codex / 本地 dsh patch 示例
-└── test/                    # mock 论坛 + 78 个用例
+└── test/                    # mock 论坛 + 93 个用例（含 multipart 上传端点）
 ```
 
 ## 10. 开发
 
 ```bash
-npm test         # 等价于 node --test "test/*.test.js"（78 个用例）
+npm test         # 等价于 node --test "test/*.test.js"（93 个用例）
 npm run mcp      # 本地起 MCP server
 ```
 

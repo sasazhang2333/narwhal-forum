@@ -9,6 +9,7 @@
  */
 import { resolveConfig, patchCredentials, maskToken } from './config.js';
 import { buildEncryptedLogin } from './crypto.js';
+import { buildMultipart, describeImage, pickUploadedUrl, absoluteImageUrl, resolveImageList, contentWithImages } from './images.js';
 
 export const REACTIONS = ['👍', '❤️', '😂', '🎉', '🤔', '😮', '😢', '🚀'];
 
@@ -418,8 +419,10 @@ export class ForumClient {
   async createComment(opts = {}) {
     this.ensureAuth('发表评论');
     const postId = opts.postId;
-    const content = typeof opts.content === 'string' ? opts.content.trim() : '';
     if (!postId) throw new ForumError('缺少 postId');
+    // 图片先在客户端上传拿到 URL，再以 markdown 内联进正文（后端零改动，见 src/images.js）。
+    const uploaded = await this.uploadImages(opts.images);
+    const content = contentWithImages(typeof opts.content === 'string' ? opts.content.trim() : '', uploaded.map((u) => u.url));
     if (!content) throw new ForumError('评论内容不能为空');
     if (content.length > 2000) throw new ForumError('评论内容超过 2000 字上限（当前 ' + content.length + ' 字）');
 
@@ -435,7 +438,8 @@ export class ForumClient {
   async createPost(opts = {}) {
     this.ensureAuth('发帖');
     const title = typeof opts.title === 'string' ? opts.title.trim() : '';
-    const content = typeof opts.content === 'string' ? opts.content.trim() : '';
+    const uploaded = await this.uploadImages(opts.images);
+    const content = contentWithImages(typeof opts.content === 'string' ? opts.content.trim() : '', uploaded.map((u) => u.url));
     if (!title) throw new ForumError('缺少标题 title');
     if (title.length > 200) throw new ForumError('标题超过 200 字上限');
     if (!content) throw new ForumError('缺少正文 content');
@@ -501,6 +505,51 @@ export class ForumClient {
       method: 'POST',
       body: { emoji },
     });
+  }
+
+  /**
+   * 上传一张本地图片（POST /api/upload/image-upload，multipart，字段名 file）。
+   *
+   * 与前端 usePasteImage 走同一个接口：登录即可上传，压缩/水印/内容审核都在服务端完成。
+   * 返回的 url 已补成绝对地址，可直接写进 markdown。
+   */
+  async uploadImage(opts = {}) {
+    this.ensureAuth('上传图片');
+    const image = opts.mime && opts.path ? opts : describeImage(opts.path || opts.file || opts);
+    const { body, boundary } = buildMultipart(image);
+    const result = await this.request('/api/upload/image-upload', {
+      method: 'POST',
+      query: opts.scene ? { scene: opts.scene } : undefined,
+      rawBody: body,
+      contentType: 'multipart/form-data; boundary=' + boundary,
+    });
+    const url = pickUploadedUrl(result);
+    if (!url) {
+      throw new ForumError('上传成功但没拿到图片 URL', {
+        detail: result,
+        hint: '用 --json 看原始响应；若后端 UploadController 改了字段名，改 pickUploadedUrl 的候选列表。',
+      });
+    }
+    return {
+      url: absoluteImageUrl(this.baseUrl, url),
+      name: image.name,
+      path: image.path,
+      bytes: image.bytes,
+      sha256: image.sha256,
+      raw: result,
+    };
+  }
+
+  /** 批量上传（顺序执行，避免并发触发后端限流）。接受路径数组或已 describeImage 的对象。 */
+  async uploadImages(list, opts = {}) {
+    const images = resolveImageList(list);
+    if (!images.length) return [];
+    this.ensureAuth('上传图片');
+    const out = [];
+    for (const image of images) {
+      out.push(await this.uploadImage({ ...image, scene: opts.scene }));
+    }
+    return out;
   }
 
   /** 只读状态：不触发网络请求，不泄露 token 明文。 */

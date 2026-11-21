@@ -1,0 +1,36 @@
+# dsh 桌面端（Electron 打包的 app）接线示例
+#
+# 背景：桌面进程的 PATH 只有 /usr/bin:/bin:/usr/sbin:/sbin（可用
+# `ps eww -p <pid> | tr ' ' '\n' | grep '^PATH='` 自行确认）。因此
+# cordis.patch.yml 里的 `command: narwhal-forum` / `npx` / `node` 都解析不到，
+# 而默认的 failOnStartupError: false 会让它「静默地没有工具」——最难查的那种失败。
+#
+# 解法：用一个绝对路径的启动器绕过 PATH（本仓库另附 `bin/narwhal-forum-mcp`
+# 生成脚本的方式见 README 5.1），或者直接写死 node 绝对路径。
+#
+# 本文件是 **profile 层** 的补丁（~/.dsh/profiles/<profile>/cordis.patch.yml），
+# 不是 bundle 层。它按 id 覆写包内 cordis.patch.yml 插入的那一行。
+#
+# ⚠️ config 是整体替换、绝不深合并：这里的每个字段都必须重述一遍，
+#    漏掉的字段会退回 @deepseek-ai/dsh-mcp-client 的默认值。
+- id: narwhal-forum-mcp
+  name: '@deepseek-ai/dsh-mcp-client'
+  config:
+    serverName: narwhal-forum
+    transport: stdio
+    # 用启动器（推荐）：与 node 版本解耦，nvm 换版本不用改这里
+    command: /Users/<you>/.dsh/bin/narwhal-forum-mcp
+    args: []
+    # 或者写死 node 绝对路径：
+    # command: /Users/<you>/.nvm/versions/node/v24.14.0/bin/node
+    # args:
+    #   - /Users/<you>/.dsh/profiles/desktop/node_modules/narwhal-forum/bin/narwhal-forum.js
+    #   - mcp
+    toolCallTimeoutMs: 60000
+    # 桌面端建议 true：起不来时直接在日志里报错，而不是静默少一批工具
+    failOnStartupError: true
+    reconnect:
+      enabled: true
+      initialDelayMs: 500
+      maxDelayMs: 30000
+      maxAttempts: 10

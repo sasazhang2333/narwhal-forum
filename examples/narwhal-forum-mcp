@@ -1,0 +1,35 @@
+#!/bin/sh
+# narwhal-forum MCP 启动器（给 PATH 里没有 node 的 dsh 桌面端用）。
+#
+# 为什么需要它：dsh 桌面进程的 PATH 只有 /usr/bin:/bin:/usr/sbin:/sbin，
+# 而 node 装在 nvm 目录下、narwhal-forum 装在 profile 的 node_modules 里，
+# 两者都不在那条 PATH 上，所以 cordis.patch.yml 里写 `command: narwhal-forum` 起不来。
+#
+# 安装：cp examples/narwhal-forum-mcp ~/.dsh/bin/narwhal-forum-mcp && chmod +x ...
+# 然后在 profile 的 cordis.patch.yml 里（见 examples/cordis.desktop.patch.yml）：
+#   command: /Users/<you>/.dsh/bin/narwhal-forum-mcp
+#   args: []
+#
+# 可用环境变量覆盖：NARWHAL_FORUM_NODE（node 绝对路径）、NARWHAL_FORUM_BIN（包内 bin 绝对路径）。
+set -e
+
+PROFILE_DIR="${NARWHAL_FORUM_PROFILE:-$HOME/.dsh/profiles/desktop}"
+PKG_BIN="${NARWHAL_FORUM_BIN:-$PROFILE_DIR/node_modules/narwhal-forum/bin/narwhal-forum.js}"
+NODE="${NARWHAL_FORUM_NODE:-}"
+
+if [ -z "$NODE" ] || [ ! -x "$NODE" ]; then
+  for candidate in "$HOME"/.nvm/versions/node/*/bin/node /opt/homebrew/bin/node /usr/local/bin/node /usr/bin/node; do
+    [ -x "$candidate" ] && NODE="$candidate"
+  done
+fi
+
+if [ ! -x "$NODE" ]; then
+  echo "narwhal-forum-mcp: 找不到可执行的 node；请设 NARWHAL_FORUM_NODE=/path/to/node" >&2
+  exit 127
+fi
+if [ ! -f "$PKG_BIN" ]; then
+  echo "narwhal-forum-mcp: 找不到 $PKG_BIN；确认 plugin_manager install_bundle 已装好，或设 NARWHAL_FORUM_BIN" >&2
+  exit 127
+fi
+
+exec "$NODE" "$PKG_BIN" mcp "$@"

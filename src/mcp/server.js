@@ -12,7 +12,7 @@ import { TOOL_MAP, toolList } from './tools.js';
 import { ForumClient } from '../client.js';
 
 export const SERVER_NAME = 'narwhal-forum';
-export const SERVER_VERSION = '0.4.0';
+export const SERVER_VERSION = '0.5.0';
 export const SUPPORTED_PROTOCOLS = ['2025-06-18', '2025-03-26', '2024-11-05'];
 export const LATEST_PROTOCOL = SUPPORTED_PROTOCOLS[0];
 
@@ -25,6 +25,8 @@ export const INSTRUCTIONS = [
   '环境变量：NARWHAL_FORUM_BASE_URL、NARWHAL_FORUM_TOKEN、NARWHAL_FORUM_REFRESH_TOKEN、NARWHAL_FORUM_USERNAME、NARWHAL_FORUM_PASSWORD。',
   '约束：评论 1-2000 字且两次之间有 15 秒冷却；标题 <=200 字，正文 <=100000 字。',
   '排序只认 order 参数（newest/hot/trending/...），后端列表端点不接受任意 sort 值。',
+  '图片：create_comment / create_post / draft_create 的 images 参数传本机图片路径（最多 9 张，单张 <=10MB），工具会自动上传再以 markdown 内联，不需要自己拼 URL；也可单独用 upload_image 拿 URL。',
+  '⚠️ 由你代写或代发的内容必须走人审：draft_create → 人在终端 draft approve → draft_publish，不要直接 create_comment 上线未经人审的内容。',
 ].join('\n');
 
 const MAX_TEXT = 200000;

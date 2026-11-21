@@ -1,6 +1,6 @@
 {
   "name": "narwhal-forum",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Narwhal CMS 论坛能力包：MCP server + CLI，让 dsh / Codex / Claude Code 等工具读取帖子、发表评论并执行其它论坛操作。登录走网页授权（先展示风险提示并取得本人确认，授权一次，可撤销）。",
   "type": "module",
   "bin": {

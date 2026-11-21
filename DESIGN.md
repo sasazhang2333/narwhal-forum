@@ -173,7 +173,8 @@ created → pending_review → approved │ rejected
 - `serverName` 决定工具前缀：`mcp__narwhal-forum__list_posts`；
 - 安装走 `plugin_manager action=install_bundle target=<包目录>`，不手改 profile 的
   `package.json` / `cordis.patch.yml`，也不在 profile 里跑包管理器；
-- `failOnStartupError: false`：MCP server 起不来时 dsh 仍能启动，只是没有这些工具；
+- `failOnStartupError: false`：MCP server 起不来时 dsh 仍能启动，只是没有这些工具
+  （**桌面端建议在 profile 层覆写成 `true`**，否则「静默地没有工具」极难排查，见 12.1）；
 - 环境变量被 dsh 清洗过，所以**认证信息不放环境变量**，放 `~/.config/narwhal-forum/credentials.json`，
   该路径不依赖进程环境。这也是为什么 bundle 里不需要 `env` 直通。
 
@@ -181,11 +182,11 @@ created → pending_review → approved │ rejected
 
 | 能力 | 状态 | 说明 |
 | --- | --- | --- |
-| 图片/附件上传 | 未实现 | 需要 multipart + 存储后端配置，超出「读+评论」的最小闭环 |
+| 图片上传 / 图片评论 | **已实现** | 复用后端已有的 `POST /api/upload/image-upload`，正文内联 markdown；[REDACTED_STREET_413] |
+| 非图片附件 | 未实现 | 后端上传接口按 `image` 分发，附件还涉存储配置与下载鉴权 |
 | 通知 / 私信 | 未实现 | 后端接口存在，但需确认权限与隐私边界 |
 | 收藏 / 关注列表 | 未实现 | 与点赞同一层，接口确定后再加，避免猜 |
 | 发帖编辑器字段（封面、摘要） | 部分 | 已透传 `summary/type/cover`，未做上传校验 |
-| 图片评论 | 未实现 | 评论实体 `GeneratedBbsComment` 无图片列；三条路线（A 文本内联 / B 后端加 `images_` 列 / C 不做）待评审，见方案 |
 | 人审记录审计（谁批的、何时批） | 未实现 | 当前只存 `reviewer` 字段；要可追溯需落地审计日志 |
 
 ## 11. 待确认
@@ -193,3 +194,65 @@ created → pending_review → approved │ rejected
 1. GitHub 私有仓库的最终名字与账号（暂按 `sasazhang2333/narwhal-forum`）。
 2. 是否发布到 npm（公开 or 私有 registry）；不发布时 dsh 用本地 patch 变体。
 3. 论坛是否在登录时启用验证码 / 双因素 —— 启用时 CLI 登录会返回结构化错误码，需改用 token 导入。
+
+## 12. 图片评论：为什么零后端改动（A 方案）
+
+### 12.1 事实（读源码得到，不是猜）
+
+| 事实 | 位置 |
+| --- | --- |
+| 前端粘贴上传已有 composable | `src/main/frontend/composables/usePasteImage.ts` → `usePasteImage(onUploaded, { scene })` |
+| 上传接口 | `POST /api/upload/image-upload`（multipart，字段名 `file`，可选 `?scene=chat`） |
+| 后端权限 | `UploadController#imageUpload` 带 `@PreAuthorize("isAuthenticated()")`：**登录即可上传** |
+| 后端处理链 | `doUpload(..., "image", ...)` → 压缩 / 水印 / `ImageModerationProvider` 内容审核 |
+| 前端渲染 | `BbsMarkdown.vue` = marked + `sanitizeHtml`（DOMPurify）；`FORBID_TAGS` 只有 script/style/form/input/textarea/select，**img 放行** |
+| 评论正文存储 | `GeneratedBbsComment` 的 content 是普通 String，只有 empty / tooLong 校验，不做 markdown 剥离 |
+
+### 12.2 三个方案
+
+| 方案 | 做法 | 结论 |
+| --- | --- | --- |
+| **A. 正文内联**（选用） | 先 `POST /api/upload/image-upload` 拿 URL，再把 `![](url)` 追加进正文 | 零后端改动、零迁移、零前端改动；图片同样走审核 |
+| B. 后端加 `images_` 列 | 迁移 + 实体 + DTO + 前端渲染 | 同一份信息存两处；为了「图片」改一整个论坛模块，成本收益不成立 |
+| C. 不做 | 只发文字 | 反馈类场景图不可替代（截图复现） |
+
+选 A 的核心理由：**上传与渲染两条链路后端已经完整存在**，缺的只是「把它们接起来」的那一步，而那一步在客户端做最便宜。
+
+### 12.3 实现要点
+
+- `src/images.js` 只做三件事：校验本地文件（扩展名 / 大小 / 空文件 / 上限 9 张）、拼 multipart（`buildMultipart`）、
+  生成 markdown（`contentWithImages` 追加到正文末尾，带 `\n\n` 分隔）。上传结果兼容 `url` / `webpUrl` / `result.url`。
+- `client.uploadImage` 先 `ensureAuth('上传图片')` 再上传，URL 补成绝对地址（正文里可能是别的域名访问）。
+- 草稿带图只存 `{path, name, mime, bytes, sha256}`，**不联网**；`draft_publish` 先 `verifyDraftImages`（存在 + 指纹一致）
+  再上传。指纹不一致 → `E_IMAGE_CHANGED`，**在上传前**失败且 token 不消费 —— 保证「人批准的是这张图」。
+- 失败分层：本地前置条件（缺文件 / 指纹变 / 带图后超 2000 字）→ exit 2；网络或论坛拒绝 → exit 1。两者都不消费 token。
+
+### 12.4 已知代价
+
+- 图片 URL 落进正文，论坛侧**没有引用计数**：文件被清理后评论会裂图（与网页端手动贴图一致）；
+- 摘要 / 搜索只索引文字，不索引图片；
+- 审核只在上传时做一次，事后改图不可能（URL 不可变，这反而是好事）。
+
+## 13. dsh 桌面端的 PATH 陷阱
+
+桌面版（Electron app）进程环境里 `PATH=/usr/bin:/bin:/usr/sbin:/sbin`，不继承 shell 的 nvm 路径。
+后果：bundle 里 `command: narwhal-forum` 在桌面端**必然起不来**，而 `failOnStartupError: false` 会把它变成
+「静默地没有 `mcp__narwhal-forum__*`」——症状与「插件没装」完全一样。
+
+因此桌面端必须在 **profile 层**按 id 覆写这一行（`plugin_manager` 装的是 bundle 层，改 profile 不改仓库）：
+
+```yaml
+- id: narwhal-forum-mcp          # 与包内 id 一致才是覆写；否则会新增一行
+  name: '@deepseek-ai/dsh-mcp-client'
+  config:                        # config 整体替换、不深合并，字段必须重述
+    serverName: narwhal-forum
+    transport: stdio
+    command: /Users/<you>/.dsh/bin/narwhal-forum-mcp   # 启动器，自己找 node
+    args: []
+    toolCallTimeoutMs: 60000
+    failOnStartupError: true
+    reconnect: { enabled: true, initialDelayMs: 500, maxDelayMs: 30000, maxAttempts: 10 }
+```
+
+启动器（`examples/narwhal-forum-mcp`）在 nvm 各版本的 node 里挑一个可执行的，再 `exec` 包内 bin，
+所以 nvm 换版本不用改 patch。改完需重启 dsh 应用。

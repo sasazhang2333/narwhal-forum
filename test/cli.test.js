@@ -117,7 +117,7 @@ test('tools / call / help / version', async () => {
   assert.match(help.stdout, /narwhal-forum/);
 
   const version = await run(['--version']);
-  assert.match(version.stdout, /0\.4\.0/);
+  assert.match(version.stdout, /0\.5\.0/);
 });
 
 test('未知命令非零退出，--json 错误可被解析', async () => {

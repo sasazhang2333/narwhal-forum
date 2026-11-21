@@ -8,11 +8,13 @@ import { REACTIONS, POST_ORDERS, flattenComments, countComments } from '../clien
 import { RISK_VERSION, riskNoticeText, riskAcknowledged, riskConsentPatch } from '../risk.js';
 import { patchCredentials, readCredentials } from '../config.js';
 import { createDraft, readDraft, listDrafts, removeDraft, verifyApprovalToken, markPublished } from '../draft.js';
+import { resolveImageList, verifyDraftImages, summarizeImages, contentWithImages, MAX_IMAGES } from '../images.js';
 
 const S = {
   str: (description, extra = {}) => ({ type: 'string', description, ...extra }),
   int: (description, extra = {}) => ({ type: 'integer', description, ...extra }),
   bool: (description, extra = {}) => ({ type: 'boolean', description, ...extra }),
+  images: (description) => ({ type: 'array', items: { type: 'string' }, description, maxItems: MAX_IMAGES }),
 };
 
 function obj(props, required = []) {
@@ -124,6 +126,11 @@ function renderDraft(record) {
     lines.push('  标题: ' + (p.title || ''));
     lines.push('  分类: ' + p.categoryId);
     lines.push('  正文:', String(p.content || ''));
+  }
+  const images = Array.isArray(p.images) ? p.images : [];
+  if (images.length) {
+    lines.push('  图片（发布时上传并内联到正文末尾，共 ' + images.length + ' 张）:');
+    for (const line of summarizeImages(images)) lines.push('    ' + line);
   }
   if (record.review) lines.push('  审阅: ' + record.review.decision + ' @ ' + record.review.at);
   if (record.approval) lines.push('  批准: ' + record.approval.expiresAt + (record.approval.usedAt ? '（已使用 ' + record.approval.usedAt + '）' : '（未使用）'));
@@ -287,16 +294,33 @@ export const TOOLS = [
     },
   },
   {
+    name: 'upload_image',
+    title: '上传图片',
+    description: '把本机一张图片上传到论坛（POST /api/upload/image-upload，与网页端粘贴上传同一接口），返回可直接写进 markdown 的 URL。需要登录。图片压缩、水印与内容审核都在服务端完成，因此不需要改后端。一般不必单独调用：create_comment / create_post / draft_create 都支持 images 参数，会自动上传并内联。单张上限 10MB，格式限 png/jpg/jpeg/gif/webp/bmp/avif。',
+    inputSchema: obj({
+      path: S.str('本机图片绝对路径（建议绝对路径）'),
+      scene: S.str('上传场景（如 chat）；聊天/私信类内容传 chat 会把文件登记为私密'),
+    }, ['path']),
+    async handler(ctx, args) {
+      const r = await ctx.client.uploadImage(args);
+      return {
+        text: '已上传：' + r.url + '\n  文件: ' + r.name + '（' + r.bytes + ' B）\n  内联写法: ![](' + r.url + ')',
+        data: { url: r.url, name: r.name, bytes: r.bytes, sha256: r.sha256 },
+      };
+    },
+  },
+  {
     name: 'create_comment',
     title: '发表评论',
-    description: '在指定帖子下发评论；传 parentId 则回复该条评论。需要登录。正文 1-2000 字；同一用户两次评论有 15 秒冷却，目标帖若开启慢速模式或已锁定会被拒绝；命中敏感词直接失败。成功后返回新评论 id。⚠️ 由 AI 代写或代发的内容必须先走人审：draft_create → 人在终端 draft approve → draft_publish；不要直接调用本工具上线未经人审的内容。',
+    description: '在指定帖子下发评论；传 parentId 则回复该条评论。需要登录。正文 1-2000 字（含图片 markdown）；同一用户两次评论有 15 秒冷却，目标帖若开启慢速模式或已锁定会被拒绝；命中敏感词直接失败。成功后返回新评论 id。images 传本机图片路径数组时会先上传再把 ![](url) 内联到正文末尾（后端零改动，图片审核在上传时完成）。⚠️ 由 AI 代写或代发的内容必须先走人审：draft_create → 人在终端 draft approve → draft_publish；不要直接调用本工具上线未经人审的内容。',
     inputSchema: obj({
       postId: S.int('帖子 id'),
       content: S.str('评论正文，1-2000 字'),
       parentId: S.int('父评论 id（回复某条评论时传）'),
       replyUserId: S.int('被回复用户 id（后端用于 @ 提示，可选）'),
       whisper: S.bool('是否悄悄话（仅部分版块支持）'),
-    }, ['postId', 'content']),
+      images: S.images('本地图片路径（最多 ' + MAX_IMAGES + ' 张），会自动上传并内联为 markdown 图片'),
+    }, ['postId']),
     async handler(ctx, args) {
       const r = await ctx.client.createComment(args);
       const id = r && (r.id || (r.result && r.result.id));
@@ -309,7 +333,7 @@ export const TOOLS = [
   {
     name: 'create_post',
     title: '发表新帖',
-    description: '在指定分类下发一篇新帖。需要登录，且账号需满足后端发帖门槛（实名/绑定手机/分类状态）。标题 <=200 字，正文 <=100000 字，摘要 <=500 字。成功返回新帖 id 与状态。⚠️ AI 生成的内容必须人审：先用 draft_create 建草稿，人在终端 draft approve 后，再用 draft_publish 发布。',
+    description: '在指定分类下发一篇新帖。需要登录，且账号需满足后端发帖门槛（实名/绑定手机/分类状态）。标题 <=200 字，正文 <=100000 字（含图片 markdown），摘要 <=500 字。images 传本机图片路径数组时会先上传再把 ![](url) 内联到正文末尾。成功返回新帖 id 与状态。⚠️ AI 生成的内容必须人审：先用 draft_create 建草稿，人在终端 draft approve 后，再用 draft_publish 发布。',
     inputSchema: obj({
       categoryId: S.int('分类 id（用 list_categories 查）'),
       title: S.str('标题，<=200 字'),
@@ -317,7 +341,8 @@ export const TOOLS = [
       summary: S.str('摘要，<=500 字'),
       type: S.str('帖子类型（后端定义，如 normal/article）'),
       cover: S.str('封面图 URL'),
-    }, ['categoryId', 'title', 'content']),
+      images: S.images('本地图片路径（最多 ' + MAX_IMAGES + ' 张），会自动上传并内联为 markdown 图片'),
+    }, ['categoryId', 'title']),
     async handler(ctx, args) {
       const r = await ctx.client.createPost(args);
       const id = r && r.id;
@@ -418,11 +443,18 @@ export const TOOLS = [
       categoryId: S.int('分类 id（kind=post 必填，用 list_categories 查）'),
       title: S.str('标题（kind=post 必填，<=200 字）'),
       summary: S.str('摘要（kind=post 可选，<=500 字）'),
+      images: S.images('本地图片路径（最多 ' + MAX_IMAGES + ' 张）。草稿只记本机路径 + sha256，不碰后端；发布时重新校验再上传'),
     }, ['kind', 'content']),
     async handler(ctx, args) {
       const content = String(args.content || '').trim();
       if (!content) throw draftFailure('E_DRAFT_EMPTY', '草稿正文不能为空');
       let payload;
+      let images = [];
+      try {
+        images = resolveImageList(args.images).map((img) => ({ path: img.path, name: img.name, mime: img.mime, bytes: img.bytes, sha256: img.sha256 }));
+      } catch (err) {
+        throw draftFailure(err.code || 'E_IMAGE', err.message, err.hint);
+      }
       if (args.kind === 'comment') {
         if (!args.postId) throw draftFailure('E_DRAFT_ARGS', 'kind=comment 需要 postId');
         payload = { postId: Number(args.postId), content };
@@ -437,6 +469,7 @@ export const TOOLS = [
       } else {
         throw draftFailure('E_DRAFT_ARGS', 'kind 只能是 comment 或 post');
       }
+      if (images.length) payload.images = images;
       let author = { userId: null, userName: null };
       try {
         const me = await ctx.client.whoami();
@@ -512,17 +545,30 @@ export const TOOLS = [
         throw draftFailure('E_REALNAME_REQUIRED', '未完成实名认证，不能发布（后端 requireVerifyToPost / requireVerifyToComment 会拦）', realname.hint || '先在站点里完成实名认证（/api/bbs/face/init），token 未被消耗，认证后可重试。');
       }
       const p = record.payload || {};
+      // 图片：先校验（文件还在、sha256 与批准时一致），再逐张上传，最后把 markdown 内联进正文。
+      let images = [];
+      try {
+        images = verifyDraftImages(p.images);
+      } catch (err) {
+        throw draftFailure(err.code || 'E_IMAGE', err.message, err.hint);
+      }
+      const uploaded = images.length ? await ctx.client.uploadImages(images) : [];
+      const content = contentWithImages(p.content, uploaded.map((u) => u.url));
+      if (record.kind === 'comment' && content.length > 2000) {
+        throw draftFailure('E_DRAFT_TOO_LONG', '带图后评论正文超过 2000 字上限（当前 ' + content.length + ' 字），token 未消费', '删掉几张图或缩短正文后重新批准。');
+      }
       let result;
       if (record.kind === 'comment') {
-        result = await ctx.client.createComment({ postId: p.postId, content: p.content, parentId: p.parentId, replyUserId: p.replyUserId, whisper: p.whisper });
+        result = await ctx.client.createComment({ postId: p.postId, content, parentId: p.parentId, replyUserId: p.replyUserId, whisper: p.whisper });
       } else {
-        result = await ctx.client.createPost({ title: p.title, content: p.content, categoryId: p.categoryId, summary: p.summary, type: p.type, cover: p.cover });
+        result = await ctx.client.createPost({ title: p.title, content, categoryId: p.categoryId, summary: p.summary, type: p.type, cover: p.cover });
       }
       const resultId = result && (result.id !== undefined ? result.id : result.commentId !== undefined ? result.commentId : result.postId);
       markPublished(record, { resultId: resultId === undefined ? null : resultId });
       const lines = [
         '已发布 ✔（草稿 ' + record.id + '，token 已消费，不可重放）',
         '  结果 id: ' + (resultId === undefined ? '（后端未返回 id）' : resultId),
+        ...(uploaded.length ? ['  图片: ' + uploaded.length + ' 张已上传并内联', ...uploaded.map((u, i) => '    ' + (i + 1) + '. ' + u.url)] : []),
         '  实名: ' + (realname.verified === true ? '已实名' : '本地未判定，以服务端结果为准'),
       ];
       return { text: lines.join('\n'), data: { draftId: record.id, kind: record.kind, resultId: resultId === undefined ? null : resultId, result } };
