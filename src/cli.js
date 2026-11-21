@@ -10,6 +10,7 @@ import path from 'node:path';
 import { ForumClient, ForumError, ForumAuthError, REACTIONS, POST_ORDERS } from './client.js';
 import { clearCredentials, patchCredentials, readCredentials, resolveConfig } from './config.js';
 import { createDraft, readDraft, listDrafts, removeDraft, approveDraft, rejectDraft, verifyApprovalToken, markPublished, summarizeDrafts } from './draft.js';
+import { submitServerDraft, publishServerDraft } from './serverdraft.js';
 import { readFileSync } from 'node:fs';
 import { RISK_VERSION, RISK_ITEMS, riskNoticeText, riskSummaryText, riskAcknowledged, riskConsentPatch } from './risk.js';
 import { SCOPES, ALL_SCOPE_IDS, parseScopeList, scopeNoticeText, scopeSummary, readGrant } from './consent.js';
@@ -582,7 +583,7 @@ async function cmdDraft(sub, flags, rest) {
   const fail = (s) => process.stderr.write('✗ ' + s + '\n');
 
   if (action === 'help' || flags.help === true) {
-    out("草稿与人审发布（AI 不能自行发布）：\n  draft new-comment <postId> --content <文本|@文件|-> [--parent <id>] [--image 图.png ...]\n  draft new-post --category <id> --title <标题> --content <文本|@文件|-> [--summary <摘要>] [--image 图.png ...]\n  draft list [--status pending_review|approved|published|rejected|expired] [--json]\n  draft show <id> [--json]\n  draft approve <id>      只在你的终端里：展示全文 → 输入 yes → 打印一次性 approvalToken（10 分钟）\n  draft reject <id> [--reason <说明>]\n  draft publish <id> --token <approvalToken>    发布前重新校验实名；token 一次性\n  draft discard <id>      删除本地草稿文件\n\n发布只接受 approvalToken，没有 --yes / --force 可绕过；MCP 侧没有 approve 工具。");
+    out("草稿与人审发布（AI 不能自行发布）：\n  draft new-comment <postId> --content <文本|@文件|-> [--parent <id>] [--image 图.png ...]\n  draft new-post --category <id> --title <标题> --content <文本|@文件|-> [--summary <摘要>] [--image 图.png ...]\n  draft list [--status pending_review|approved|published|rejected|expired] [--json]\n  draft show <id> [--json]\n  draft approve <id>      只在你的终端里：展示全文 → 输入 yes → 打印一次性 approvalToken（10 分钟）\n  draft reject <id> [--reason <说明>]\n  draft publish <id> --token <approvalToken>    发布前重新校验实名；token 一次性\n  draft discard <id>      删除本地草稿文件\n\n站点侧草稿（人审在网页，站点留档）：new-comment / new-post 后加 --server：\n  draft new-comment <postId> --content <文本> --server [--web-url <前端地址>] [--image 图.png]\n  draft new-post --category <id> --title <标题> --content <文本> --server [--web-url <前端地址>]\n  draft list --server [--status pending|approved|denied|published|expired]\n  draft show DR-xxxxxxxx\n  draft publish DR-xxxxxxxx    人在网页上批准之后才领得到内容（领取一次即失效）");
     return 0;
   }
 
@@ -603,11 +604,40 @@ async function cmdDraft(sub, flags, rest) {
       if (action === 'new-post' && flags.summary !== undefined) payload.summary = String(flags.summary);
       const images = resolveImageList(flags.image);
       if (images.length) payload.images = images.map((img) => ({ path: img.path, name: img.name, mime: img.mime, bytes: img.bytes, sha256: img.sha256 }));
+      if (flags.server === true) {
+        const payloadForServer = { ...payload };
+        if (images.length) {
+          const uploaded = await client.uploadImages(images);
+          payloadForServer.images = uploaded.map((u) => u.url);
+        }
+        const draft = await submitServerDraft(client, {
+          kind: action === 'new-comment' ? 'comment' : 'post',
+          payload: payloadForServer,
+          clientName: 'narwhal-forum@' + VERSION,
+          webBaseUrl: flags['web-url'] || process.env.NARWHAL_FORUM_WEB_URL,
+        });
+        if (flags.json) { out(JSON.stringify(draft, null, 2)); return 0; }
+        out('已提交站点侧草稿 ' + draft.draftCode + '（状态 ' + (draft.statusTitle || draft.status) + '）');
+        out('  内容指纹: ' + String(draft.payloadHash || '').slice(0, 12) + '...');
+        out('  给人打开的审理页: ' + draft.reviewUrl);
+        out('  批准后: narwhal-forum draft publish ' + draft.draftCode);
+        return 0;
+      }
       const record = createDraft({ kind: action === 'new-comment' ? 'comment' : 'post', payload, author, baseUrl: client.baseUrl });
       if (flags.json) { out(JSON.stringify(record, null, 2)); return 0; }
       out(draftView(record));
       out('');
       out('下一步（必须由人来做）: narwhal-forum draft approve ' + record.id);
+      return 0;
+    }
+
+    if (action === 'list' && flags.server === true) {
+      const client = clientFrom(flags);
+      const res = await client.listServerDrafts({ status: typeof flags.status === 'string' ? flags.status : undefined, limit: 50 });
+      const list = (res && (res.content || (res.result && res.result.content))) || [];
+      if (flags.json) { out(JSON.stringify(list, null, 2)); return 0; }
+      if (!list.length) { out('（站点侧没有草稿）'); return 0; }
+      out(list.map((d) => d.draftCode + '  ' + String(d.statusTitle || d.status).padEnd(10) + ' ' + d.kind + '  ' + String(d.payloadHash || '').slice(0, 12) + '...').join('\n'));
       return 0;
     }
 
@@ -620,6 +650,25 @@ async function cmdDraft(sub, flags, rest) {
     }
 
     if (!id) { fail('用法: draft ' + action + ' <id>'); return 2; }
+
+    if (action === 'show' && /^DR-/i.test(String(id))) {
+      const client = clientFrom(flags);
+      const raw = await client.getServerDraft(String(id));
+      const draft = (raw && raw.result) || raw || {};
+      if (flags.json) { out(JSON.stringify(draft, null, 2)); return 0; }
+      out('草稿 ' + draft.draftCode + '（' + (draft.statusTitle || draft.status) + '）');
+      out('  提交方: ' + (draft.clientName || '未署名'));
+      out('  内容指纹: ' + String(draft.payloadHash || ''));
+      out('  到期: ' + (draft.expiresAt || '—'));
+      out('  内容:');
+      for (const [k, v] of Object.entries(draft.payload || {})) {
+        if (k === 'images') continue;
+        out('    ' + k + ': ' + String(v));
+      }
+      const imgs = (draft.payload && draft.payload.images) || [];
+      if (imgs.length) out('    图片: ' + imgs.length + ' 张');
+      return 0;
+    }
 
     if (action === 'show') {
       const record = readDraft(id);
@@ -634,6 +683,14 @@ async function cmdDraft(sub, flags, rest) {
     if (action === 'reject') {
       const record = rejectDraft(id, { reason: typeof flags.reason === 'string' ? flags.reason : null, reviewer: 'tty' });
       out(flags.json ? JSON.stringify(record, null, 2) : '已拒绝 ' + id + (flags.reason ? '（' + flags.reason + '）' : ''));
+      return 0;
+    }
+
+    if (action === 'publish' && /^DR-/i.test(String(id))) {
+      const client = clientFrom(flags);
+      const res = await publishServerDraft(client, String(id));
+      if (flags.json) { out(JSON.stringify(res, null, 2)); return 0; }
+      out('已按站点侧草稿 ' + res.draftCode + ' 发布' + (res.resultId ? '（id=' + res.resultId + '）' : '（后端未回 id）'));
       return 0;
     }
 

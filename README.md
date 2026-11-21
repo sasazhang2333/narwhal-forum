@@ -309,6 +309,26 @@ narwhal-forum draft publish drf-1a2b3c4d --token nfap_…   # 持 token 才能�
 
 草稿与批准密钥落在 `~/.config/narwhal-forum/`（目录 `0700`、文件 `0600`）：`drafts/<id>.json` 存正文与状态，`approval.key` 存 HMAC 密钥（首次批准时生成）。
 
+#### 4.3.1 站点侧草稿（`--server`）：把批准搬到网页上
+
+本地草稿（上一节）的批准只发生在「跑命令的那台机器」上：换台机器看不到，审理记录也留在本机。
+`--server` 把草稿交给站点，人**在浏览器里点批准**，站点记下 reviewer / 时间 / 内容指纹。
+
+```bash
+narwhal-forum draft new-comment 42 --content @reply.md --server --web-url http://localhost:3000
+#   → 已提交站点侧草稿 DR-1A2B3C4D（状态 待审）
+#     给人打开的审理页: http://localhost:3000/cli/draft?code=DR-1A2B3C4D
+narwhal-forum draft list --server                 # 看自己交过的草稿与状态
+narwhal-forum draft show DR-1A2B3C4D              # 看正文 / 指纹 / 谁批的
+narwhal-forum draft publish DR-1A2B3C4D           # 人批过之后，工具才能领取并发布
+```
+
+- 工具**拿不到可发布的内容**，除非站点上有人点过「批准」（服务端 `consume` 只认 `approved`，且只能领取一次）；
+- 草稿 24 小时有效，正文在提交时就被 `payload_hash` 钉死，批准后改内容不可行；
+- 带图草稿会先把图片上传换成 URL 再提交（图片本来就要上传才能显示）；
+- 服务端拦住的是「没人点批准」，**拦不住「同一个账号自己批自己」** —— 站点只能留痕（`reviewer_id` / `approved_at` / `payload_hash`）供事后核对；
+- MCP 侧对应 `draft_create(mode="server")` → 回 `draftCode` + `reviewUrl`，`draft_publish(draftCode="DR-…")` 发布。
+
 ### 4.4 图片评论（`--image`）
 
 评论正文是普通字符串，前端用 marked + DOMPurify 渲染（`<img>` 放行），所以**图片不占数据库字段**：

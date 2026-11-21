@@ -651,6 +651,64 @@ export class ForumClient {
    * moderationConfig.shouldAutoApprove），不批准就不出现在列表里。权限是后端判的
    * （`canModeratePost`：管理员或该版块版主），没有权限会拿到 403。
    */
+  // ── 草稿上云（/api/cli/draft，1121）────────────────────────────────
+  // 本地草稿放在工具那台机器上，换台机器就查不到；这几个方法把草稿交给站点保管，
+  // 人审挪到网页（/cli/draft?code=DR-xxxxxxxx），站点记 reviewer/时间/内容指纹。
+
+  async createServerDraft(opts = {}) {
+    this.ensureAuth('提交草稿');
+    if (!opts.kind) throw new ForumError('缺少 kind（comment / post）');
+    if (!opts.payload || typeof opts.payload !== 'object') throw new ForumError('缺少 payload');
+    return this.request('/api/cli/draft', {
+      method: 'POST',
+      body: { kind: opts.kind, payload: opts.payload, clientName: opts.clientName || undefined },
+    });
+  }
+
+  async getServerDraft(code) {
+    this.ensureAuth('查看草稿');
+    if (!code) throw new ForumError('缺少草稿编号（DR-xxxxxxxx）');
+    return this.request('/api/cli/draft/' + encodeURIComponent(code));
+  }
+
+  async listServerDrafts(opts = {}) {
+    this.ensureAuth('查看草稿');
+    const query = {};
+    if (opts.status) query.status = opts.status;
+    if (opts.limit) query.limit = opts.limit;
+    return this.request('/api/cli/draft', { query });
+  }
+
+  /** 人是这个动作的唯一合法发起者：工具侧没有 approve 入口（这里只给人审页用）。 */
+  async reviewServerDraft(opts = {}) {
+    this.ensureAuth('审批草稿');
+    const decision = String(opts.decision || '').toLowerCase();
+    if (!['approve', 'allow', 'deny', 'reject'].includes(decision)) {
+      throw new ForumError('decision 只能是 approve / deny');
+    }
+    if (!opts.code) throw new ForumError('缺少草稿编号（DR-xxxxxxxx）');
+    return this.request('/api/cli/draft/' + encodeURIComponent(opts.code) + '/review', {
+      method: 'POST',
+      body: { decision, note: opts.note || undefined },
+    });
+  }
+
+  /** 领取一条「已批准」的草稿：服务端在这一步把它标成 published，重复领取会被拒。 */
+  async consumeServerDraft(code) {
+    this.ensureAuth('发布草稿');
+    if (!code) throw new ForumError('缺少草稿编号（DR-xxxxxxxx）');
+    return this.request('/api/cli/draft/' + encodeURIComponent(code) + '/consume', { method: 'POST' });
+  }
+
+  async reportDraftResult(opts = {}) {
+    this.ensureAuth('回报草稿结果');
+    if (!opts.code) throw new ForumError('缺少草稿编号（DR-xxxxxxxx）');
+    return this.request('/api/cli/draft/' + encodeURIComponent(opts.code) + '/result', {
+      method: 'POST',
+      body: { resultId: opts.resultId === undefined ? null : opts.resultId, result: opts.result || undefined },
+    });
+  }
+
   async approvePost(opts = {}) {
     this.ensureAuth('批准帖子');
     if (!opts.postId) throw new ForumError('缺少 postId');

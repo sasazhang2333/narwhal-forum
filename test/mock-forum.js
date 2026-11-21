@@ -110,6 +110,8 @@ export async function startMockForum(options = {}) {
     gatePost: null,
     // 真实后端：新账号/未达信任阈值 → 发帖进待审（status=-1），要审核批准才公开
     autoApprove: true,
+    // 草稿上云（真实后端表 tusksynxcms_cli_draft）
+    drafts: new Map(),
     lastCommentAt: 0,
     // 设备码授权（/api/cli/device/*）：与真实后端 CliDeviceAuthApiController 同形状
     deviceCodes: new Map(),   // deviceCode -> { deviceCode, userCode, clientName, scopes, status }
@@ -197,6 +199,66 @@ export async function startMockForum(options = {}) {
       res.end(JSON.stringify(payload));
     };
     const unauth = () => send(401, { status: -1, message: 'unauthorized' });
+
+    // ——— 草稿上云（真实后端：CliDraftApiController，/api/cli/draft）———
+    // 与真后端同语义：pending → (人审页 review) approved/denied → (工具 consume) published。
+    if (method === 'POST' && pathname === '/api/cli/draft') {
+      const payload = JSON.parse(body || '{}');
+      const kind = payload.kind;
+      if (kind !== 'comment' && kind !== 'post') return send(200, failure('kind 只能是 comment 或 post'));
+      const draftPayload = payload.payload || {};
+      if (!String(draftPayload.content || '').trim()) return send(200, failure('草稿正文不能为空'));
+      const draftCode = 'DR-' + crypto.randomBytes(4).toString('hex').toUpperCase();
+      const entry = {
+        draftCode,
+        kind,
+        payload: draftPayload,
+        payloadHash: crypto.createHash('sha256').update(kind + '\n' + JSON.stringify(draftPayload)).digest('hex'),
+        status: 'pending',
+        statusTitle: '待审',
+        clientName: payload.clientName || 'unknown-client',
+        reviewUri: '/cli/draft?code=' + draftCode,
+        expiresIn: 86400,
+      };
+      state.drafts.set(draftCode, entry);
+      return send(200, envelope(entry));
+    }
+    if (method === 'GET' && pathname === '/api/cli/draft') {
+      const status = url.searchParams.get('status');
+      const list = [...state.drafts.values()].filter((d) => !status || d.status === status);
+      return send(200, envelope({ content: list, total: list.length }));
+    }
+    const draftRoute = pathname.match(/^\/api\/cli\/draft\/(DR-[0-9A-Z]+)(\/review|\/consume|\/result)?$/);
+    if (draftRoute) {
+      const entry = state.drafts.get(draftRoute[1]);
+      if (!entry) return send(200, failure('草稿不存在或已过期'));
+      const action = draftRoute[2] || '';
+      if (!action && method === 'GET') return send(200, envelope(entry));
+      if (action === '/review' && method === 'POST') {
+        const payload = JSON.parse(body || '{}');
+        if (entry.status !== 'pending') return send(200, failure('这条草稿当前状态是「' + entry.statusTitle + '」，不能再审批'));
+        const approve = ['approve', 'allow'].includes(String(payload.decision || '').toLowerCase());
+        entry.status = approve ? 'approved' : 'denied';
+        entry.statusTitle = approve ? '已批准' : '已拒绝';
+        entry.note = payload.note || null;
+        entry.reviewerId = 1;
+        entry.approvedAt = new Date().toISOString();
+        return send(200, envelope(entry));
+      }
+      if (action === '/consume' && method === 'POST') {
+        if (entry.status !== 'approved') return send(200, failure('这条草稿不是「已批准」状态，不能发布'));
+        entry.status = 'published';
+        entry.statusTitle = '已发布';
+        return send(200, envelope({ draftCode: entry.draftCode, kind: entry.kind, status: 'published', payloadHash: entry.payloadHash, payload: entry.payload }));
+      }
+      if (action === '/result' && method === 'POST') {
+        const payload = JSON.parse(body || '{}');
+        entry.resultId = payload.resultId === undefined ? null : payload.resultId;
+        entry.result = payload.result || null;
+        return send(200, envelope({ draftCode: entry.draftCode, resultId: entry.resultId, result: entry.result }));
+      }
+      return send(404, failure('not found'));
+    }
 
     // ——— 设备码授权（真实后端：CliDeviceAuthApiController）———
     if (method === 'POST' && pathname === '/api/cli/device/code') {

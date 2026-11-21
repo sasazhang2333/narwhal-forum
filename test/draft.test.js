@@ -108,7 +108,7 @@ test('篡改签名 / 换用户 / 未批准 都被拒', () => {
   assert.equal(draft.verifyApprovalToken(approved, null, {}).code, 'E_APPROVAL_REQUIRED');
 });
 
-test('MCP 工具表里没有「草稿」批准类工具（草稿放行只能发生在人的终端）', () => {
+test('MCP 工具表里没有「草稿」批准类工具（草稿放行只能发生在人的终端）', async () => {
   const names = TOOLS.map((t) => t.name);
   assert.ok(names.includes('draft_create'));
   assert.ok(names.includes('draft_publish'));
@@ -119,7 +119,17 @@ test('MCP 工具表里没有「草稿」批准类工具（草稿放行只能发�
   assert.ok(!names.some((n) => /draft/i.test(n) && /approve|accept/i.test(n)), 'MCP 不应暴露 draft 批准工具，实际: ' + names.join(','));
   assert.ok(names.includes('approve_post'), '帖子审核批准工具应当存在（版主用）');
   const publish = TOOLS.find((t) => t.name === 'draft_publish');
-  assert.ok(publish.inputSchema.required.includes('approvalToken'), 'draft_publish 必须强制要求 approvalToken');
+  // 1121 起发布有两条路，但**两条都必须先有人批准**：
+  //   · 本地草稿：draftId + approvalToken（token 只能在人终端里生成）；
+  //   · 站点侧草稿：draftCode（必须先在网页上被批准，服务端记 reviewer/时间/指纹）。
+  // 所以 schema 里不能把 approvalToken 写成无条件必填，但也不能两条都不给就放行。
+  assert.ok(publish.inputSchema.properties.draftCode, 'draft_publish 必须支持站点侧草稿编号');
+  assert.ok(publish.inputSchema.properties.approvalToken, 'draft_publish 必须支持本地草稿的一次性 token');
+  await assert.rejects(
+    () => publish.handler({ client: null, clientName: 'test' }, {}),
+    (err) => err.code === 'E_DRAFT_ARGS',
+    '两条路都不给时必须拒绝',
+  );
 });
 
 /* ---------------------------------------------------------------- CLI 契约 */

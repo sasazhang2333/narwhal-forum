@@ -9,6 +9,7 @@ import { RISK_VERSION, riskNoticeText, riskAcknowledged, riskConsentPatch } from
 import { parseScopeList, scopeNoticeText, scopeSummary, readGrant } from '../consent.js';
 import { patchCredentials, readCredentials } from '../config.js';
 import { createDraft, readDraft, listDrafts, removeDraft, verifyApprovalToken, markPublished } from '../draft.js';
+import { submitServerDraft, publishServerDraft } from '../serverdraft.js';
 import { resolveImageList, verifyDraftImages, summarizeImages, contentWithImages, MAX_IMAGES } from '../images.js';
 
 const S = {
@@ -574,6 +575,7 @@ export const TOOLS = [
     description: '把要发布的内容写成**本地草稿**，不碰后端、也不上线。这是 AI 发布内容的唯一入口：草稿必须由人在自己的终端里运行 `narwhal-forum draft approve <id>` 批准，拿到一次性 approvalToken 之后才能用 draft_publish 发布。MCP 侧没有 approve 工具（故意的）。',
     inputSchema: obj({
       kind: S.str('草稿类型：comment=评论 / post=发帖', { enum: ['comment', 'post'] }),
+      mode: S.str('草稿存在哪里：local=本机磁盘（默认，人审在人的终端里）/ server=站点侧（人审在网页 /cli/draft?code=DR-xxxx，记录留在站点）', { enum: ['local', 'server'], default: 'local' }),
       postId: idField('评论目标帖子 id（kind=comment 必填）'),
       content: S.str('正文（评论 1-2000 字；帖子 <=100000 字）'),
       parentId: idField('回复某条评论时传父评论 id（kind=comment 可选）'),
@@ -609,6 +611,35 @@ export const TOOLS = [
         throw draftFailure('E_DRAFT_ARGS', 'kind 只能是 comment 或 post');
       }
       if (images.length) payload.images = images;
+      if (String(args.mode || 'local') === 'server') {
+        // 服务端草稿只存 URL：先把本地图片传上去，让「批准的是哪张图」落在站点里。
+        let urls = [];
+        if (images.length) {
+          const uploaded = await ctx.client.uploadImages(images);
+          urls = uploaded.map((u) => u.url);
+        }
+        const payloadForServer = { ...payload };
+        if (urls.length) payloadForServer.images = urls; else delete payloadForServer.images;
+        let draft;
+        try {
+          draft = await submitServerDraft(ctx.client, {
+            kind: args.kind,
+            payload: payloadForServer,
+            clientName: ctx.clientName || 'narwhal-forum',
+            webBaseUrl: ctx.webBaseUrl || process.env.NARWHAL_FORUM_WEB_URL,
+          });
+        } catch (err) {
+          throw draftFailure(err.code || 'E_DRAFT_SERVER', err.message, err.hint);
+        }
+        const lines = [
+          '已提交草稿 ' + draft.draftCode + '（站点侧，状态 ' + (draft.statusTitle || draft.status) + '）',
+          '  内容指纹: ' + String(draft.payloadHash || '').slice(0, 12) + '...',
+          '  给人打开的审理页: ' + draft.reviewUrl,
+          '  下一步必须由人在这个页面上点「批准并允许发布」；批准后再调用 draft_publish（draftCode=' + draft.draftCode + '）。',
+          '  站点会记下审批人、时间与内容指纹；工具侧没有批准入口。',
+        ];
+        return { text: lines.join('\n'), data: { draftCode: draft.draftCode, status: draft.status, payloadHash: draft.payloadHash, reviewUrl: draft.reviewUrl } };
+      }
       let author = { userId: null, userName: null };
       try {
         const me = await ctx.client.whoami();
@@ -634,8 +665,19 @@ export const TOOLS = [
     description: '列出本机保存的发布草稿及其状态（pending_review 待人工批准 / approved 已批准待发布 / published / rejected / expired）。只读一次磁盘，不访问后端。',
     inputSchema: obj({
       status: S.str('只看某个状态', { enum: ['pending_review', 'approved', 'published', 'rejected', 'expired'] }),
+      source: S.str('草稿在哪：local=本机（默认）/ server=站点侧', { enum: ['local', 'server'], default: 'local' }),
     }),
     async handler(ctx, args) {
+      if (String(args.source || 'local') === 'server') {
+        const res = await ctx.client.listServerDrafts({ status: args.status, limit: 50 });
+        const list = (res && (res.content || (res.result && res.result.content))) || [];
+        if (!list.length) return { text: '（站点侧没有草稿' + (args.status ? '，状态 ' + args.status : '') + '）', data: { total: 0 } };
+        const lines = ['站点侧草稿（共 ' + list.length + ' 个）'];
+        for (const d of list) {
+          lines.push('- ' + d.draftCode + '  ' + (d.statusTitle || d.status) + '  ' + d.kind + '  ' + String(d.payloadHash || '').slice(0, 12) + '...');
+        }
+        return { text: lines.join('\n'), data: { total: list.length, drafts: list.map((d) => ({ draftCode: d.draftCode, status: d.status, kind: d.kind })) } };
+      }
       const records = listDrafts({ status: args.status });
       if (!records.length) return { text: '（没有草稿' + (args.status ? '，状态 ' + args.status : '') + '）', data: { total: 0 } };
       const lines = ['草稿（共 ' + records.length + ' 个）'];
@@ -658,10 +700,26 @@ export const TOOLS = [
     title: '发布已批准的草稿',
     description: '发布一条已被**人**批准的草稿。必须带 approvalToken（由人在终端 `draft approve` 生成，一次性、绑定内容指纹与用户、10 分钟失效）。发布前会用后端实时核验实名状态；未实名直接失败且不消耗 token。AI 不能自己批准、也不能绕过 token 发布。',
     inputSchema: obj({
-      draftId: S.str('草稿 id'),
-      approvalToken: S.str('人工批准产生的一次性 token（nfap_ 开头）'),
-    }, ['draftId', 'approvalToken']),
+      draftCode: S.str('站点侧草稿编号（DR-xxxxxxxx）。给了它就按「服务端已批准」发布，不需要 draftId/approvalToken'),
+      draftId: S.str('本地草稿 id（与 draftCode 二选一）'),
+      approvalToken: S.str('人工批准产生的一次性 token（nfap_ 开头；本地草稿必填）'),
+    }, []),
     async handler(ctx, args) {
+      if (args.draftCode) {
+        let out;
+        try {
+          out = await publishServerDraft(ctx.client, String(args.draftCode));
+        } catch (err) {
+          throw draftFailure(typeof err.code === 'string' ? err.code : 'E_DRAFT_PUBLISH', err.message, err.hint || '草稿必须先在网页上被「批准」；被拒绝或已发布的草稿不能再发。');
+        }
+        return {
+          text: '已按站点侧草稿 ' + out.draftCode + ' 发布' + (out.resultId ? '（id=' + out.resultId + '）' : '（后端未回 id）') + (out.status === -1 ? '，状态待审（status=-1）：有审核权限的账号可用 approve_post 批准后公开。' : '。'),
+          data: out,
+        };
+      }
+      if (!args.draftId) {
+        throw draftFailure('E_DRAFT_ARGS', '要么给 draftCode（站点侧草稿），要么给 draftId + approvalToken（本地草稿）');
+      }
       const record = readDraft(args.draftId);
       let userId;
       try {
