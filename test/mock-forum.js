@@ -11,6 +11,16 @@ export const ACCESS_TOKEN = 'test-access-token';
 export const REFRESH_TOKEN = 'test-refresh-token';
 export const EXPIRED_TOKEN = 'expired-token';
 
+/** 与真实后端对齐的门禁响应：status=-1 + result.blockers + message。 */
+export function gated(kind, action) {
+  const map = {
+    realname: { code: 'realname', title: '完成实名认证', desc: '需完成实名认证后' + action, actionLabel: '去认证', actionTo: '/forum/settings?tab=profile' },
+    mobile: { code: 'mobile', title: '绑定手机号', desc: '需先绑定手机号' + action, actionLabel: '去绑定', actionTo: '/forum/settings?tab=binding#mobile-binding' },
+  };
+  const b = { ...map[kind], action };
+  return { status: -1, result: { blockers: [b] }, message: b.desc, exception: null };
+}
+
 function envelope(result) {
   return { status: 0, result };
 }
@@ -94,6 +104,9 @@ export async function startMockForum(options = {}) {
     // CMS 栏目：真实后端 /api/channel 返回的是**扁平数组**（不分页），字段有 id/name/alias/site
     channels: [{ id: 1, name: '综合', alias: 'general', depth: 1 }],
     enforceCooldown: false,
+    // 门禁：真实后端在「未绑手机 / 未实名」时返回 HTTP 200 + status=-1 + result.blockers
+    gateComment: null,   // 'mobile' | 'realname' | null
+    gatePost: null,
     // 真实后端：新账号/未达信任阈值 → 发帖进待审（status=-1），要审核批准才公开
     autoApprove: true,
     lastCommentAt: 0,
@@ -290,6 +303,7 @@ export async function startMockForum(options = {}) {
 
       if (pathname === '/api/bbs/comment' && method === 'POST') {
         if (!authed(req)) return unauth();
+        if (state.gateComment) return send(200, gated(state.gateComment, '才能评论'));
         const payload = JSON.parse(body || '{}');
         const content = String(payload.content || '').trim();
         if (!content) return send(200, failure('评论内容不能为空'));

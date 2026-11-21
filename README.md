@@ -463,6 +463,34 @@ NARWHAL_FORUM_BASE_URL = "http://127.0.0.1:8080"
      `create_comment` 写库、`react_post` toggle、`create_post` 返回真实 `status`、待审时 `approve_post` 放行、
      `delete_post` 清理自造的冒烟帖。另手工验过：图片上传 + 带图评论、嵌套回复、搜索、CMS 栏目、草稿人审闸。
 
+### 8.0 权限与门禁实测（2026-11-21，真后端逐项验过）
+
+插件自己不判权限 —— 所有授权都由后端决定，插件只负责把「被拦的原因」和「去哪解决」原样端出来。
+下表是三种身份在真实后端上的实际结果（`✅` 通过 / `🚫` 被后端拒绝并给出可执行提示）：
+
+| 操作 | 匿名（未登录） | 普通用户（无角色） | 管理员 |
+| --- | --- | --- | --- |
+| `list_posts` / `get_post` / `list_comments` / `list_categories` / `list_channels` / `search_posts` | ✅ | ✅ | ✅ |
+| `create_comment` | 🚫 `🔒 「发表评论」需要登录`（退出码 1） | ✅（需先绑手机 + 实名，见下） | ✅ |
+| `create_post` | 🚫 需要登录 | ✅，但 `status=-1` 待审 | ✅，**同样** `status=-1` 待审 |
+| `react_post` | 🚫 需要登录 | ✅ | ✅ |
+| `approve_post` | 🚫 需要登录 | 🚫 `No permission`（HTTP 400） | ✅ |
+| `delete_comment` | 🚫 需要登录 | ✅ 仅自己的；别人的 🚫 `Only the author can delete this comment` | ✅ 可删任何人的 |
+| `delete_post` | 🚫 需要登录 | ✅ 仅自己的；别人的 🚫 `Only the author can delete this post` | ✅ 可删任何人的 |
+
+两道**内容门禁**（普通用户写内容前必须过，管理员豁免）：
+
+1. 未绑手机 → `需先绑定手机号才能评论` + blocker `actionTo=/forum/settings?tab=binding#mobile-binding`；
+2. 未实名 → `需完成实名认证后才能评论` + blocker `actionTo=/forum/settings?tab=profile`。
+
+后端的门禁响应是 **HTTP 200 + `status=-1` + `result.blockers[]`**（`{code,title,desc,actionLabel,actionTo,action}`）。
+插件把 `blockers` 一路透传：CLI 打成 `· 完成实名认证（去认证）：/forum/settings?tab=profile`，
+MCP 的 `isError` 结果正文里附同样的清单、并放进 `structuredContent.error.blockers`，
+`--json` 输出顶层带 `blockers`。**被拦时不能只说「失败了」，要给出去哪解决**。
+
+其它已验证的边界：无效 token → `🔒 未登录或登录已过期（HTTP 401）`；评论 15 秒冷却原样透出；
+删除不存在的 id → `BbsPost not found. ID = <id>（HTTP 404 …）`；不带 `confirm` 的删除在插件层就被拦下（不碰后端）。
+
 ### 8.1 真实后端实测踩到的 5 个坑（都已修，附成因）
 
 这些不是「理论上可能」，是本轮连真后端时**实际把功能跑坏**的东西：

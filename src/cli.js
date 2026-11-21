@@ -733,8 +733,16 @@ export async function main(argv = process.argv.slice(2)) {
     const isImage = err instanceof ImageError || (err && err.name === 'ImageError');
     const prefix = isAuth ? '🔒 ' : '✗ ';
     process.stderr.write(prefix + (err && err.message ? err.message : String(err)) + '\n');
-    if (err && err.hint) process.stderr.write('   ' + err.hint + '\n');
-    if (flags.json && err) process.stdout.write(JSON.stringify({ error: err.name, message: err.message, code: err.code, hint: err.hint }, null, 2) + '\n');
+    // 有结构化 blockers 就逐条列（带「去哪解决」的路径），比压成一句更有用；否则退回单行 hint。
+    if (err && Array.isArray(err.blockers)) {
+      for (const b of err.blockers) {
+        if (!b || typeof b !== 'object') continue;
+        process.stderr.write('   · ' + (b.title || b.code || '待办') + (b.actionLabel ? '（' + b.actionLabel + '）' : '') + (b.actionTo ? '：' + b.actionTo : '') + '\n');
+      }
+    } else if (err && err.hint) {
+      process.stderr.write('   ' + err.hint + '\n');
+    }
+    if (flags.json && err) process.stdout.write(JSON.stringify({ error: err.name, message: err.message, code: err.code, hint: err.hint, blockers: err.blockers || undefined }, null, 2) + '\n');
     if (err instanceof ForumError && err.detail && flags.verbose) process.stderr.write('   detail: ' + JSON.stringify(err.detail).slice(0, 2000) + '\n');
     return isImage ? 2 : 1;
   }

@@ -288,3 +288,23 @@ test('tools/call delete_post：confirm=true 后帖子消失', async () => {
   const after = await stdio.tool('list_posts', { page: 1, pageSize: 20 });
   assert.ok(!after.text.includes('#2 '), '删掉的帖子不该再出现: ' + after.text);
 });
+
+/* ------------------------------------------- 门禁 blockers（未绑手机 / 未实名） */
+
+test('tools/call 被门禁拦下时：保留 blockers（含 actionTo），不丢成一句散文', async () => {
+  mock.state.gateComment = 'realname';
+  try {
+    const { text, isError, structured } = await stdio.tool('create_comment', {
+      postId: '1',
+      content: '这条会被实名门禁拦下',
+    });
+    assert.equal(isError, true, '门禁应当是错误结果');
+    assert.match(text, /需完成实名认证后才能评论/);
+    assert.match(text, /\/forum\/settings\?tab=profile/, '必须给出「去哪解决」的路径: ' + text);
+    assert.ok(structured.error && Array.isArray(structured.error.blockers), '结构化结果里要有 blockers');
+    assert.equal(structured.error.blockers[0].code, 'realname');
+    assert.equal(structured.error.blockers[0].actionTo, '/forum/settings?tab=profile');
+  } finally {
+    mock.state.gateComment = null;
+  }
+});

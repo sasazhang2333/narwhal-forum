@@ -121,7 +121,16 @@ export class ForumMcpServer {
             const text = [err && err.message ? err.message : String(err), err && err.hint ? '👉 ' + err.hint : null]
               .filter(Boolean)
               .join('\n');
-            return ok(id, { content: [{ type: 'text', text: clip(text) }], isError: true, _meta: { errorName: err && err.name, code: err && err.code } });
+            const blocked = Array.isArray(err && err.blockers) ? err.blockers : null;
+            const extra = blocked
+              ? '\n\n' + blocked.map((b) => '- ' + (b.title || b.code || '待办') + (b.actionLabel ? '（' + b.actionLabel + '）' : '') + (b.actionTo ? '：' + b.actionTo : '')).join('\n')
+              : '';
+            return ok(id, {
+              content: [{ type: 'text', text: clip(text + extra) }],
+              isError: true,
+              ...(blocked ? { structuredContent: { error: { name: err.name, message: err.message, code: err.code, blockers: blocked } } } : {}),
+              _meta: { errorName: err && err.name, code: err && err.code },
+            });
           }
         }
         case 'resources/list':

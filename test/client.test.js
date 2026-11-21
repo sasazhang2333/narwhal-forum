@@ -192,3 +192,26 @@ test('withReplies=false 时只拉一级，不多打请求', async () => {
   assert.equal(tree[0].children, undefined);
   assert.ok(!mock.state.requests.some((r) => String(r.pathname).includes('/replies')), '不应请求 /replies');
 });
+
+/* ------------------------------------------- 门禁 blockers（HTTP 200 + status=-1） */
+
+test('createComment 被门禁拦下：ForumError 带 blockers 与可执行 hint', async () => {
+  const { ForumClient, ForumError } = await import('../src/client.js');
+  const client = new ForumClient({ baseUrl: mock.baseUrl, token: ACCESS_TOKEN, persist: false });
+  mock.state.gateComment = 'mobile';
+  try {
+    await assert.rejects(
+      () => client.createComment({ postId: 1, content: '手机号门禁' }),
+      (err) => {
+        assert.ok(err instanceof ForumError);
+        assert.match(err.message, /需先绑定手机号/);
+        assert.equal(err.blockers.length, 1);
+        assert.equal(err.blockers[0].code, 'mobile');
+        assert.match(err.hint, /\/forum\/settings\?tab=binding/);
+        return true;
+      }
+    );
+  } finally {
+    mock.state.gateComment = null;
+  }
+});

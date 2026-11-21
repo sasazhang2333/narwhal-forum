@@ -33,6 +33,9 @@ export class ForumError extends Error {
     this.status = extra.status;
     this.detail = extra.detail;
     this.hint = extra.hint;
+    // 后端的「待办」结构（result.blockers）：code/title/desc/actionLabel/actionTo。
+    // 这是门禁被拦时唯一能给出「去哪里解决」的信息，别丢。
+    this.blockers = Array.isArray(extra.blockers) && extra.blockers.length ? extra.blockers : null;
   }
 }
 
@@ -57,7 +60,26 @@ export function unwrapEnvelope(json) {
   if (!isEnvelope(json)) return json;
   if (json.status === 0) return json.result !== undefined ? json.result : null;
   const message = json.message || ('接口返回失败（status=' + json.status + '）');
-  throw new ForumError(message, { code: json.status, detail: json.result });
+  const blockers = json.result && Array.isArray(json.result.blockers) ? json.result.blockers : null;
+  throw new ForumError(message, {
+    code: json.status,
+    detail: json.result,
+    blockers,
+    hint: blockerHint(blockers),
+  });
+}
+
+/** 把后端 blockers 压成一行可执行提示；没有可用 actionTo 时返回 undefined（交给 explain）。 */
+export function blockerHint(blockers) {
+  if (!Array.isArray(blockers) || blockers.length === 0) return undefined;
+  return blockers
+    .map((b) => {
+      if (!b || typeof b !== 'object') return null;
+      const title = b.title || b.desc || b.code || '待办';
+      return b.actionTo ? title + ' → ' + b.actionTo : title;
+    })
+    .filter(Boolean)
+    .join('；') || undefined;
 }
 
 function buildQuery(query) {
@@ -167,17 +189,19 @@ export class ForumClient {
     }
     if (!res.ok) {
       const msg = (json && (json.message || json.error)) || res.statusText || ('HTTP ' + res.status);
+      const blockers = json && json.result && Array.isArray(json.result.blockers) ? json.result.blockers : null;
       throw new ForumError(msg + '（HTTP ' + res.status + ' ' + (ctx.method || 'GET') + ' ' + ctx.path + '）', {
         status: res.status,
         detail: json,
-        hint: explain(msg),
+        blockers,
+        hint: blockerHint(blockers) || explain(msg),
       });
     }
     try {
       return unwrapEnvelope(json);
     } catch (err) {
       if (err instanceof ForumError) {
-        err.hint = err.hint || explain(err.message);
+        err.hint = err.hint || blockerHint(err.blockers) || explain(err.message);
         throw err;
       }
       throw err;

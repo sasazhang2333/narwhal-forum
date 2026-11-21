@@ -303,3 +303,20 @@ CMS 栏目、草稿人审闸。
 `--requirepass ruoyi123`；curl 必须带 `-A 'Mozilla/5.0'`（后端有 UA 过滤）并加 `--noproxy '*'`（本机有 http_proxy）。
 管理员口令与 `application.yaml` 里 `UJCMS_PASSWORD_PEPPER` 绑定的 PBKDF2WithHmacSM3 有关，重置口令要用应用自己的
 编码器生成 `{pbkdf2}…` 再写库，直接抄文档里的 `123456` 是登录不上的。
+
+## 16. 授权与门禁：插件不判权限，只透传「为什么被拦」
+
+一句话原则：**授权是后端的，插件是传声筒**。因此插件里没有任何 `if (role === 'admin')`；它做三件事：
+
+1. 写操作前 `ensureAuth()`：没登录就本地直接拒绝（`🔒 「发表评论」需要登录`，退出码 1），不打无意义的请求；
+2. 后端拒绝时把原文照抄（中文文案、HTTP 状态、`METHOD path` 都保留），不让调用方去猜；
+3. **把 `result.blockers` 原样带上**（`code/title/desc/actionLabel/actionTo`）。
+
+第 3 条是本轮补的：真后端在「未绑手机 / 未实名」时返回的是 **HTTP 200 + `status=-1`**（不是 4xx），
+`result.blockers[]` 里才有「去哪解决」的路径。早期实现把它丢了，模型只能说「失败了，去网页端看看」，
+现在是 `· 完成实名认证（去认证）：/forum/settings?tab=profile` —— 这句话才能被直接执行。
+CLI、MCP（正文 + `structuredContent.error.blockers`）、`--json` 三个出口都带同一份结构。
+
+顺带确认的两个后端事实（都已写进 README §8.0 的矩阵）：
+- **管理员发帖也进待审**（`status=-1`），不是特权豁免；要公开仍得 `approve_post`；
+- 普通用户写内容要过「绑手机 → 实名」两道门，而这两道门对管理员豁免（`src/main/java/com/tusksynx/bbs/web/api/BbsPostApiController.java` 的 `isRealNameVerified` 只在非 admin 路径检查）。
