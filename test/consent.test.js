@@ -171,3 +171,11 @@ test('syncGrantedScopes：不是 cli 会话（真人设备/密码登录）时不
     fs.rmSync(home, { recursive: true, force: true });
   }
 });
+
+test('scopeError：draft 越界的提示要说明「有也只能提交、批准只能在网页上」', () => {
+  const err = scopeError('draft_create', { need: 'draft', grant: { scopes: ['read', 'write:comment'] } });
+  assert.equal(err.code, 'E_SCOPE_DENIED');
+  assert.match(err.message, /人审草稿/);
+  assert.match(err.hint, /人在网页上点/);
+  assert.match(err.hint, /draft_create/);
+});

@@ -49,7 +49,7 @@ export const SCOPES = [
   {
     id: 'draft',
     title: '人审草稿',
-    detail: '创建/查看本地草稿（发布仍需人在终端 draft approve，这一层插件自己也不会放行）',
+    detail: '提交/查看站点侧草稿（draft-*）。即使有它也只能「提交」，批准必须由人在网页上点 —— AI 不能自己批准自己写的内容。',
   },
 ];
 
@@ -142,6 +142,10 @@ export function scopeError(toolName, info) {
   err.code = 'E_SCOPE_DENIED';
   err.hint = '要扩权可以在网页「设置 → 账号安全 → AI 工具授权」里给这个工具勾上对应能力（保存后下一次请求即生效），'
     + '或者重新授权：narwhal-forum login（dsh 里调用 login 工具带 scopes）。只读内容不需要授权。';
+  if (info.need === 'draft') {
+    err.hint += ' 注意 draft 是「人审草稿」：有它也只能提交/查看，批准永远要人在网页上点；'
+      + '没有它则 draft_create / draft_list / draft_publish 一律被挡。';
+  }
   err.scope = info.need;
   err.grantedScopes = info.grant ? info.grant.scopes : [];
   return err;
