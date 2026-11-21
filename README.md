@@ -1,0 +1,365 @@
+# narwhal-forum
+
+Narwhal CMS 论坛（BBS）能力包：**一个零运行时依赖的 Node 包，同时是 MCP server、CLI 和 dsh 插件**。
+让 dsh、Claude Code、Codex 以及任何支持 MCP 的工具，都能读帖子、看评论、发评论、发帖、搜索、互动。
+
+- MCP stdio server：`narwhal-forum mcp` —— dsh / Claude Code / Codex 共用的唯一能力面
+- CLI：`narwhal-forum posts` / `narwhal-forum new-comment 42 --content 你好` —— 给人或脚本用
+- dsh 插件：包内 `cordis.patch.yml` 把上面这个 MCP server 接进 `@deepseek-ai/dsh-mcp-client`
+
+> 默认后端 `http://127.0.0.1:8080`；认证用 token（登录后自动保存到本地凭据文件）。
+> 本包只调用论坛已有的 HTTP API，不修改、不依赖 narwhal-cms 的任何内部代码。
+
+---
+
+## 1. 安装
+
+```bash
+# 用户级安装（不需要 sudo；~/.local/bin 通常已在 PATH 里）
+npm i -g --prefix ~/.local /path/to/narwhal-forum
+
+# 从 npm（发布后）
+npm i -g --prefix ~/.local narwhal-forum
+
+# 或者完全不装，直接跑本地包目录
+npx --package "$PWD" narwhal-forum --help
+```
+
+⚠️ **本机已知问题**：默认 npm 缓存目录归属异常会让 `npm` 命令失败
+（`npm error sudo chown -R 501:20 ~/.npm`）。先换一个可写缓存再装：
+
+```bash
+export npm_config_cache="$TMPDIR/npmcache"
+npm i -g --prefix ~/.local .
+```
+
+`npx` 也能直接解析本地包目录 / tarball：
+
+```bash
+npx -y narwhal-forum --help                                  # 已发布到 npm
+npx --package /path/to/narwhal-forum narwhal-forum --help    # 本地目录
+npx --package ./narwhal-forum-0.1.0.tgz narwhal-forum --help # 本地 tarball
+```
+
+---
+
+## 2. 30 秒上手
+
+```bash
+narwhal-forum status                       # 后端地址、登录状态
+narwhal-forum post 42 --comments           # 帖子详情 + 评论树
+narwhal-forum search 关键词
+narwhal-forum setup                        # 首次：检查后端 + 打开浏览器登录授权（会记住，可撤销）
+narwhal-forum auth status                  # 看当前是否已授权、授权方式、profile 位置
+narwhal-forum new-comment 42 --content '写点什么'
+narwhal-forum whoami
+```
+
+---
+
+## 3. 配置
+
+优先级：**命令行参数 > 环境变量 > 凭据文件 > 默认值**。
+
+| 环境变量 | 作用 | 默认 |
+| --- | --- | --- |
+| `NARWHAL_FORUM_BASE_URL` | 后端地址，如 `http://127.0.0.1:8080` | `http://127.0.0.1:8080` |
+| `NARWHAL_FORUM_TOKEN` | access token（读写之外的操作需要它） | — |
+| `NARWHAL_FORUM_REFRESH_TOKEN` | refresh token（401 时自动续期） | — |
+| `NARWHAL_FORUM_USERNAME` | 登录用户名 | — |
+| `NARWHAL_FORUM_PASSWORD` | 登录密码（仅登录时使用，**从不落盘**） | — |
+| `NARWHAL_FORUM_BROWSER` | 指定浏览器可执行文件（默认自动找 Chrome / Edge / Brave / Chromium） | — |
+| `NARWHAL_FORUM_BROWSER_PROFILE` | 浏览器授权专用的 profile 目录 | `<HOME>/browser` |
+| `NARWHAL_FORUM_HOME` | 凭据目录 | `~/.config/narwhal-forum` |
+| `NARWHAL_FORUM_TIMEOUT_MS` | 单请求超时 | `30000` |
+
+凭据文件：`~/.config/narwhal-forum/credentials.json`（目录 `0700`、文件 `0600`、原子写）。
+只存 baseUrl / token / refreshToken / username / authMode / loggedInAt / browserProfile，**不存密码**。
+浏览器授权的登录态另存在 `<HOME>/browser/`（独立 Chrome profile），撤销时整个目录一起删掉。
+
+> 密钥类信息一律走环境变量或 `token set`，不要写进仓库、脚本或文档。
+
+---
+
+## 4. CLI
+
+全局选项：`--base-url --token --refresh-token --timeout --json --debug --help --version`
+登录相关：`--password --username --browser <路径> --timeout-sec <秒> --keep-browser`
+
+| 命令 | 说明 | 需要登录 |
+| --- | --- | --- |
+| `status` | 后端地址、登录状态、凭据来源 | 否 |
+| `setup` | 首次接入：检查后端 → 打开浏览器授权 → 打印下一步 | 否 |
+| `risk` | 授权前必读的风险提示；每次 `login`/`setup` 也会先打印 | 否 |
+| `login` | **网页授权登录**：打开独立浏览器窗口，人工登录后自动取 token（见 4.2） | 否 |
+| `login --password` | 退回账号密码登录（RSA+AES 加密传输） | 否 |
+| `logout` | **撤销授权**：后端登出 + 删本地凭据 + 删浏览器 profile | 否 |
+| `auth status` | 授权状态（是否登录、授权方式、profile 位置） | 否 |
+| `token set` / `show` / `clear` | 直接管理 token（适合从浏览器复制） | 否 |
+| `whoami` | 当前登录用户 | 是 |
+| `posts` | 帖子列表（`--page --page-size --category --order --title-like`） | 否 |
+| `post <id>` | 帖子详情（`--comments` 带评论树，`--comment-sort`） | 否 |
+| `comments <postId>` | 评论树 | 否 |
+| `categories` / `channels` | 分类 / 频道 | 否 |
+| `search <关键词>` | 全文搜索（后端 Lucene） | 否 |
+| `my-comments` | 我发过的评论 | 是 |
+| `new-comment <postId> --content <文本|->` | 发表评论 / 回复（`--parent` 指定父评论） | 是 |
+| `new-post --category <id> --title <t> --content <文本|@file|->` | 发帖 | 是 |
+| `react <postId> [--emoji 👍]` | 表情互动 | 是 |
+| `draft <子命令>` | **人审发布**：`new-comment` `new-post` `list` `show` `approve` `reject` `publish` `discard`（见 4.3） | 视子命令 |
+| `mcp` | 以 MCP stdio server 运行 | — |
+| `tools [--json]` | 列出全部能力及参数 schema | — |
+| `call <tool> --json '<参数 JSON>'` | 直接调用任意能力（逃生舱） | 视工具 |
+
+`--content` 支持三种来源：字符串、`@文件路径`、`-`（stdin）。
+
+```bash
+echo '从 stdin 来的正文' | narwhal-forum new-comment 42 --content -
+narwhal-forum new-post --category 3 --title '标题' --content @draft.md
+narwhal-forum call create_comment --json '{"postId":42,"content":"hi"}'
+```
+
+退出码：`0` 成功 / `1` 业务或网络错误 / `2` 用法错误（含人审令牌校验失败）/ `3` 未实名，不能发布。加 `--json` 输出机器可读结果。
+
+---
+
+### 4.1 授权前的风险提示（必读）
+
+`login` / `setup` **在打开浏览器之前**会先打印风险提示，并要求你本人确认；非交互环境（CI、被脚本或 Agent 管道调用）没有 `--yes` 一律拒绝授权 —— 不允许「静默授权」。同意会记录版本号，文案升级后会再问一次。
+
+~~~text
+$ narwhal-forum login
+授权前请先阅读风险提示（v2） — 目标：http://127.0.0.1:8080
+
+  1. 内容责任在账号：通过本工具发出的帖子与评论，在论坛上算你这个账号发的，后果由账号所有者承担。
+  2. AI 不能自行发布：写操作最终由发起调用的方触发；动手前请确认内容你本人看过。……
+  3. 自动化有风控风险：论坛与 B 站会对高频、模板化、批量互动限流、删评甚至封号。……
+  4. 只用你自己的权限：不提供管理端接口、不提供「以他人身份」操作……
+  5. 未实名不能发布：后端 requireVerifyToPost / requireVerifyToComment；本工具不代做实名。
+  6. 凭据留在本机，可随时撤销：token 与 profile 在本机（0600 / 0700），logout 可撤销。
+  7. 图片与外链：外链可能失效、图片可能被拦。
+  8. 操作留痕：本机记录写操作的时间、目标与结果。
+
+  同意即表示你已阅读并接受以上风险；不同意可随时 Ctrl+C 退出。
+确认已阅读并接受以上风险，输入 yes 继续（其它输入取消）> 
+~~~
+
+| 场景 | 行为 |
+| --- | --- |
+| 交互终端，首次 | 展示全文，必须输入 `yes` |
+| 交互终端，已同意过同版本 | 展示全文 + 「已同意过」，回车继续 |
+| 非交互，已同意过 | 展示全文，继续（同意是一次性人工行为） |
+| 非交互，没同意过 | **拒绝授权**，提示在终端里运行或加 `--yes` |
+| `--yes` / `NARWHAL_FORUM_ACCEPT_RISK=1` | 跳过交互（只在你能为发布内容负责时使用），并记录同意 |
+
+MCP 侧同理：`mcp__narwhal-forum__login` 第一次调用**不打开浏览器**，只把风险全文返回给模型，要求它展示给你；只有你确认后带 `acknowledgeRisks: true` 再调用，才会真的打开浏览器。
+
+随时查看完整文案与同意状态：`narwhal-forum risk`（或 `risk --json`）；`auth status` 里也会显示 `riskAcknowledged`。
+
+---
+
+### 4.2 授权登录与撤销（推荐）
+
+`narwhal-forum login` 不问你密码，而是**打开一个浏览器窗口**：你在里面照常用论坛的登录页登录，
+插件通过 DevTools 协议只读地取出该页面 `localStorage` 里的 `auth_token` / `auth_refresh_token`，
+写入凭据文件后自动关闭窗口。整个过程密码不经过 CLI、不经过 dsh、不经过模型。
+
+```text
+$ narwhal-forum login
+· 浏览器已打开：http://127.0.0.1:8080/login
+· 请在该窗口里完成登录，登录成功后会自动继续（最多等 300 秒）
+授权成功（网页登录）
+凭据已写入 ~/.config/narwhal-forum/credentials.json（0600，已含 refresh token）
+浏览器 profile: ~/.config/narwhal-forum/browser（撤销授权时会一并删除）
+撤销方式: narwhal-forum logout
+```
+
+| 要点 | 说明 |
+| --- | --- |
+| 独立 profile | 浏览器用 `--user-data-dir=<HOME>/browser` 启动，和你日常浏览器互不干扰 |
+| 只读令牌 | 只 `Runtime.evaluate` 读那两个 localStorage 键，不读 cookie、不读密码框 |
+| 一次即可 | token 写入凭据文件，之后 CLI / MCP / 其它工具都用它；refresh token 自动续期 |
+| 可撤销 | `narwhal-forum logout`：调后端登出 → 删凭据 → 删 profile（cookie 一起消失） |
+| 可保留 | `logout --keep-browser` 只清 token，保留 profile 里的登录态，下次免登录 |
+| 无浏览器时 | `login --password` 走账号密码；或 `token set --access <token>` 手工导入 |
+
+**要求**：Node >= 22（内置 `WebSocket` 用来连浏览器调试端口）。低于这个版本 `login` 会直接提示改用 `--password`。
+
+**关于「安装时自动打开浏览器」**：npm 安装不应该在你背后弹窗，所以打开浏览器这一步放在
+`setup` / `login` 上。dsh 里装完插件后，第一次用论坛能力前跑一次 `narwhal-forum setup`；
+`mcp__narwhal-forum__login` 工具调用时也会打开浏览器（写操作失败提示「需要登录」时让 Agent 调它）。
+
+---
+
+### 4.3 人审发布：AI 写、人批准、再上线
+
+模型/AI 写的内容**不允许自己发出去**。写、批准、发布是三段分离的动作，批准只能发生在**人的终端**里：
+
+```bash
+narwhal-forum draft new-comment 42 --content @reply.md    # AI 侧：只落本地草稿，不联网
+narwhal-forum draft show drf-1a2b3c4d                     # 人：看全文（含目标帖子）
+narwhal-forum draft approve drf-1a2b3c4d                  # 人：TTY 里输入 yes → 打印一次性 token
+narwhal-forum draft publish drf-1a2b3c4d --token nfap_…   # 持 token 才能发布
+```
+
+- **token 一次性**：用过即废（`E_APPROVAL_USED`），重放不可能；
+- **10 分钟有效**（`APPROVAL_TTL_MS`），过期后草稿降级为 `expired`，需重新批准；
+- **绑定内容指纹**：批准后改一个字，旧 token 立刻作废（`E_APPROVAL_HASH_MISMATCH`），防「批准 A、发布 B」；
+- **绑定动作与用户**：发帖的 token 不能用来发评论（`E_APPROVAL_ACTION` / `E_APPROVAL_USER`）；
+- **发布前强校验实名**：`verifiedType=0` 直接拒绝（退出码 `3`），且**不消费 token** —— 实名后同一个 token 还能用；
+- **MCP 侧没有批准类工具**：Agent 能建草稿、能读草稿、能拿 token 发布，但 `draft approve` 只在 TTY 里跑，Agent 无权自己批；
+- `draft publish` 只认 `--token`，没有 `--yes` / `--force`。
+
+草稿与批准密钥落在 `~/.config/narwhal-forum/`（目录 `0700`、文件 `0600`）：`drafts/<id>.json` 存正文与状态，`approval.key` 存 HMAC 密钥（首次批准时生成）。
+
+---
+
+## 5. 接入各工具
+
+### dsh（插件形式）
+
+```bash
+# 1) 先让命令在 PATH 上（三选一）
+npm i -g --prefix ~/.local /path/to/narwhal-forum   # 推荐：用户级，无需 sudo
+# 或 npm i -g narwhal-forum                        # 已发布到 npm 时
+
+# 2) 装进 dsh：target = 本包绝对目录
+plugin_manager action=install_bundle target="/path/to/narwhal-forum"
+```
+
+```bash
+# 3) 授权一次（会打开浏览器；之后 dsh 里的论坛调用都用这份凭据）
+narwhal-forum setup
+```
+
+包内 `cordis.patch.yml` 完成接线：`@deepseek-ai/dsh-mcp-client` 以 stdio 拉起
+`narwhal-forum mcp`，工具以 `mcp__narwhal-forum__<tool>` 暴露给 Agent。
+升级 / 卸载走同一入口（`plugin_manager` 的 set_plugin / remove_bundle），不要手改 profile。
+
+| 你的安装方式 | patch 的 command / args |
+| --- | --- |
+| `npm i -g --prefix ~/.local .`（默认配置） | `narwhal-forum` / `[mcp]` |
+| 已发布到 npm，想用 npx | `npx` / `[-y, narwhal-forum, mcp]` |
+| 不装全局，源码直跑 | `node` / `[<包目录>/bin/narwhal-forum.js, mcp]`（见 `examples/cordis.local.patch.yml`） |
+
+### Claude Code
+
+```json
+{
+  "mcpServers": {
+    "narwhal-forum": {
+      "command": "narwhal-forum",
+      "args": ["mcp"],
+      "env": { "NARWHAL_FORUM_BASE_URL": "http://127.0.0.1:8080" }
+    }
+  }
+}
+```
+
+放在项目 `.mcp.json` 或 `~/.claude.json`。没装全局就把 `command` 换成 `npx`、`args` 换成 `["-y","narwhal-forum","mcp"]`。
+
+### Codex CLI
+
+```toml
+[mcp_servers.narwhal-forum]
+command = "narwhal-forum"
+args = ["mcp"]
+
+[mcp_servers.narwhal-forum.env]
+NARWHAL_FORUM_BASE_URL = "http://127.0.0.1:8080"
+```
+
+### 任意 MCP host
+
+任何支持 stdio MCP 的客户端：命令 `narwhal-forum`，参数 `mcp`。
+协议版本协商支持 `2025-06-18` / `2025-03-26` / `2024-11-05`。
+
+---
+
+## 6. 能力矩阵（MCP 工具与 CLI 同源）
+
+| 工具 | 作用 | 主要参数 | 只读 | 需登录 |
+| --- | --- | --- | --- | --- |
+| `status` | 配置与登录状态 | — | ✅ | 否 |
+| `login` | 网页授权登录（默认）/ 账号密码 | `mode` `timeoutSec` `browserPath` `username?` `password?` `captchaToken?` | ❌ | 否 |
+| `logout` | 撤销授权（后端登出 + 删凭据 + 删 profile） | `keepBrowser?` | ❌ | 否 |
+| `whoami` | 当前用户 | — | ✅ | 是 |
+| `list_posts` | 帖子列表 | `page` `pageSize` `categoryId` `userId` `titleLike` `order` | ✅ | 否 |
+| `get_post` | 帖子详情 | `postId` `withComments` `commentSort` | ✅ | 否 |
+| `list_comments` | 评论树 | `postId` `sort` | ✅ | 否 |
+| `list_categories` | 分类 | `page` `pageSize` | ✅ | 否 |
+| `list_channels` | 频道 | `page` `pageSize` | ✅ | 否 |
+| `search_posts` | 搜索 | `q` `categoryId` `userId` `dateFrom` `dateTo` `sort` `page` `pageSize` | ✅ | 否 |
+| `my_comments` | 我的评论 | `page` `pageSize` | ✅ | 是 |
+| `create_comment` | 发表评论 | `postId` `content` `parentId?` `replyUserId?` `whisper?` | ❌ | 是 |
+| `create_post` | 发帖 | `categoryId` `title` `content` `summary?` `type?` `cover?` | ❌ | 是 |
+| `react_post` | 表情互动 | `postId` `emoji` | ❌ | 是 |
+| `draft_create` | 落本地草稿（**不发出去**） | `kind` `content` `postId?` `parentId?` `replyUserId?` `whisper?` `categoryId?` `title?` `summary?` | ❌（不联网） | 否 |
+| `draft_list` | 草稿列表 | `status?` | ✅ | 否 |
+| `draft_get` | 单条草稿 | `draftId` | ✅ | 否 |
+| `draft_discard` | 丢弃草稿 | `draftId` | ❌ | 否 |
+| `draft_publish` | 用**人给的一次性 token** 发布 | `draftId` `approvalToken` | ❌ | 是 |
+
+`order` 取值：`newest` `hot` `trending` `unanswered` `following` `most-collected` `best-all-time` `on-this-day`。
+`emoji` 白名单：👍 ❤️ 😂 🎉 🤔 😮 😢 🚀。
+
+---
+
+## 7. 排错
+
+| 现象 | 原因 / 处理 |
+| --- | --- |
+| 连不上论坛后端 | 后端没起或 `NARWHAL_FORUM_BASE_URL` 不对；先 `narwhal-forum status` |
+| 这个操作需要登录 | `narwhal-forum login` 或 `token set` |
+| 评论太快了，请等 15 秒再发 | 后端限流，等冷却 |
+| 需要手机号 / 实名认证 | 后端策略，补齐账号资料后重试 |
+| 401 自动刷新后仍失败 | refresh token 过期，重新登录 |
+| 没找到 Chrome / Edge / Brave | `--browser <路径>` 或 `NARWHAL_FORUM_BROWSER`；或 `login --password` |
+| 等待登录超时（LOGIN_TIMEOUT） | 窗口里没完成登录；重跑 `login`，或加 `--timeout-sec 600` |
+| 当前 Node 没有内置 WebSocket | Node < 22，用 `login --password` 或升级 Node |
+| `npm error sudo chown ...` | 见第 1 节，换 `npm_config_cache` |
+
+---
+
+## 8. 已知限制
+
+- **未实现**：附件 / 图片上传、通知、私信、收藏与关注列表（后端有接口但未纳入本包；`call` 逃生舱可临时补位）。
+- **验证边界**：78 个用例跑在进程内 mock 后端（同一套契约）；真实论坛的端到端验证需要 narwhal-cms 后端在 `8080` 运行。浏览器授权把「开浏览器 + 取 token」抽成可注入的取值函数来测，真实弹窗需要人工验证一次。
+- **待确认**：GitHub 私有仓库名与归属账号、是否发布到 npm 私有源。
+- 论坛若开启验证码 / 双因素登录：**网页授权天然通过**（人就在真浏览器里）；只有 `login --password` 会返回 `CAPTCHA_REQUIRED` / `TWO_FACTOR_REQUIRED`。
+- 浏览器授权依赖 Chromium 系浏览器（Chrome / Edge / Brave / Chromium）；Safari / Firefox 不支持，需 `--password` 或 `token set`。
+
+---
+
+## 9. 目录
+
+```text
+narwhal-forum/
+├── bin/narwhal-forum.js     # CLI 入口（bin 名：narwhal-forum / nf）
+├── src/
+│   ├── client.js            # 论坛 API 客户端（错误模型、401 刷新重放）
+│   ├── auth.js              # 浏览器授权登录 / 撤销 / 状态（CDP 读 token）
+│   ├── crypto.js            # RSA + AES 登录加密
+│   ├── config.js            # 配置解析 + 凭据文件
+│   ├── cli.js               # 命令行
+│   ├── index.js             # 库导出
+│   └── mcp/
+│       ├── server.js        # 手写 MCP stdio JSON-RPC server
+│       └── tools.js         # 14 个能力定义与渲染
+├── cordis.patch.yml         # dsh 插件接线
+├── locale/{en,zh}.json      # dsh 插件文案
+├── icon.svg
+├── examples/                # Claude Code / Codex / 本地 dsh patch 示例
+└── test/                    # mock 论坛 + 78 个用例
+```
+
+## 10. 开发
+
+```bash
+npm test         # 等价于 node --test "test/*.test.js"（78 个用例）
+npm run mcp      # 本地起 MCP server
+```
+
+## License
+
+MIT

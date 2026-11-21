@@ -1,0 +1,36 @@
+# narwhal-forum — dsh 插件接线（配置型 bundle，不含运行时代码）
+#
+# 干了什么：让 @deepseek-ai/dsh-mcp-client 以 stdio 方式拉起本包的 MCP server，
+# 论坛能力随即以 mcp__narwhal-forum__<tool> 出现在 Agent 的工具列表里。
+#
+# 安装：plugin_manager { action: "install_bundle", target: "<本包绝对目录>" }
+# 卸载：plugin_manager { action: "remove_bundle", target: "narwhal-forum" }
+#
+# ⚠️ 先决条件：命令 narwhal-forum 必须能被 dsh 找到。三选一：
+#   1) 用户级安装（推荐，无需 sudo）：npm i -g --prefix ~/.local <本包目录>
+#   2) 若已发布到 npm：把下面 command 改成 npx、args 改成 [-y, narwhal-forum, mcp]
+#   3) 源码直跑（不想装全局）：command 改 node，args 改 [<本包目录>/bin/narwhal-forum.js, mcp]
+#      示例见 examples/cordis.local.patch.yml
+#
+# 装好后跑一次授权（会打开浏览器让人登录，一次即可，可撤销）：
+#   narwhal-forum setup     # 检查后端 + 打开浏览器授权 + 打印下一步
+#   narwhal-forum logout    # 撤销授权（后端登出 + 删凭据 + 删浏览器 profile）
+#
+# 认证与后端地址不走这里：token 存在 ~/.config/narwhal-forum/credentials.json，
+# 因此不需要 env 直通（dsh 会清洗环境变量里的密钥）。
+- insert:
+    - id: narwhal-forum-mcp
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: narwhal-forum
+        transport: stdio
+        command: narwhal-forum
+        args:
+          - mcp
+        toolCallTimeoutMs: 60000
+        failOnStartupError: false
+        reconnect:
+          enabled: true
+          initialDelayMs: 500
+          maxDelayMs: 30000
+          maxAttempts: 10

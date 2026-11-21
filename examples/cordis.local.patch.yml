@@ -1,0 +1,15 @@
+# 本地源码版 patch：不经过 npm 发布，直接用本机 node 跑这个仓库的 bin。
+# 把 <REPO> 换成本仓库的绝对路径（npm 包目录，不是 bin 文件）。
+# 装法一样：plugin_manager { action: "install_bundle", target: "<REPO>" }
+- insert:
+    - id: narwhal-forum-mcp
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: narwhal-forum
+        transport: stdio
+        command: node
+        args:
+          - <REPO>/bin/narwhal-forum.js
+          - mcp
+        toolCallTimeoutMs: 60000
+        failOnStartupError: false

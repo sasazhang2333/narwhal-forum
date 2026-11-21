@@ -1,0 +1,7 @@
+# Codex CLI: 放进 ~/.codex/config.toml（以 Codex 自身文档为准）
+[mcp_servers.narwhal-forum]
+command = "npx"
+args = ["-y", "narwhal-forum", "mcp"]
+
+[mcp_servers.narwhal-forum.env]
+NARWHAL_FORUM_BASE_URL = "http://127.0.0.1:8080"

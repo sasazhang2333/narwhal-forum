@@ -1,0 +1,195 @@
+# DESIGN — narwhal-forum 技术方案
+
+## 1. 目标与边界
+
+- 让 dsh（以及 Claude Code、Codex、任何 MCP host）能读论坛、发评论、发帖、搜索、互动。
+- 插件是**独立仓库**，与 `narwhal-cms/` 同级存放；只通过论坛已有 HTTP API 访问数据，
+  **不改、不侵入** narwhal-cms 的代码、构建或数据库。
+- 凭据只经环境变量 / 本地凭据文件传递，不进仓库、不进日志。
+
+## 2. 形态选型：一个包 = MCP server + CLI + dsh 配置型 bundle
+
+| 候选 | 结论 | 原因 |
+| --- | --- | --- |
+| dsh 原生 Cordis 插件（写 Service/Tool） | 否 | 只能 dsh 用，Claude Code / Codex 无法复用；且需跟着 dsh 内部 API 走 |
+| 只做 CLI | 否 | Agent 调 CLI 靠 prompt 约定，脆弱、无 schema、无结构 |
+| 只做 MCP server | 部分 | Agent 能用，但人/脚本/CI 不好直接跑 |
+| **MCP server + CLI + dsh 接线（选中）** | ✅ | 一份能力实现三种入口；MCP 的 tools/* schema 是 Agent 的通用接口，CLI 是人的接口；dsh 侧只需要一个配置型 bundle |
+
+关键点：**能力只实现一次**。CLI 的每个子命令都映射到同一个 MCP 工具处理器
+（`src/cli.js` 的 `COMMANDS` 表 → `src/mcp/tools.js`），所以两条路径的输出、参数校验、
+错误文案完全同源，不会出现「CLI 能发、Agent 发不了」这种漂移。
+
+dsh 侧采用**配置型 bundle**（`cordis.patch.yml` + `locale/` + `icon.svg`，不含运行时代码）：
+它不重写论坛逻辑，只把 `@deepseek-ai/dsh-mcp-client` 指向本包的 `mcp` 子命令。
+这样 dsh 的升级不会打破插件，插件也不复刻 dsh 的 Tool 注册 API。
+
+## 3. 为什么零运行时依赖
+
+- `dependencies: {}`：npx 首次启动不用下载依赖树，冷启动快、离线可用；
+- 也规避了本机 `npm` 缓存不可写导致装不上依赖的现实问题；
+- 实现只需要：HTTP (`fetch`)、加密 (`node:crypto`)、REPL IO (`node:readline`)、主进程（`node:child_process` 仅测试用）——全是 Node 内置。
+
+## 4. 为什么手写 MCP stdio server 而不是引 SDK
+
+MCP over stdio 是「一行一个 JSON-RPC 2.0 消息」，核心方法只有 `initialize`、`tools/list`、
+`tools/call`（外加 ping / 资源 / 提示的空实现）。手写约 250 行，换来：
+
+- 零依赖、可控的错误策略（工具失败返回 `isError`，协议层不出错）；
+- 协议版本协商按客户端来：支持 `2025-06-18` / `2025-03-26` / `2024-11-05`，客户端报支持的版本就回显它，否则回最新；
+- **协议流纯净**：启动即把 `console.log/info/debug` 重定向到 stderr，测试里断言「stdout 每一行都是合法 JSON」。
+
+## 5. 论坛 API 契约
+
+- 统一响应包裹：成功 `{ "status": 0, "result": ... }`，失败 `{ "status": -1, "message": "..." }`。
+  判断不能只看有没有 `result`（帖子实体自带 `status` 字段表示审核状态），所以
+  `isEnvelope()` 用「`status` 是数字 + 字段数 ≤ 4 + 含 `result` 或 `message`」联合判定，
+  再 `unwrapEnvelope()` 拆包 —— 避免把帖子对象当成响应包裹误伤。
+- 列表查询用后端已有的 `Q_` DSL：`EQ_categoryId_Long`、`EQ_userId_Long`、`LIKE_title_String` 等，
+  `page` / `pageSize` 必填，`pageSize` 上限 100（`normalizePage()` 兜底）。
+- 排序不是查询参数而是**端点**：`hot` / `trending` / `most-collected` 等走各自的
+  `/api/bbs/...` 路径，`POST_ORDERS` 表负责映射。
+
+## 6. 登录：浏览器授权（默认）+ 账号密码（备用）
+
+论坛前端（Nuxt SPA）登录成功后把 JWT 写进 `localStorage` 的 `auth_token` / `auth_refresh_token`。
+插件不重造登录协议，而是**借一个真实浏览器**完成同一步人工授权：
+
+```text
+spawn Chrome --user-data-dir=<HOME>/browser --remote-debugging-port=0 <baseUrl>/login
+  → 读 <profile>/DevToolsActivePort 拿到调试端口
+  → GET /json/list 选中登录页 target
+  → WebSocket 连上，循环 Runtime.evaluate(读 localStorage 的两个 token 键)
+  → 拿到 token → 写 credentials.json(0600) → 关窗口、杀进程
+```
+
+**为什么这样选**（三个候选的取舍）：
+
+| 方案 | 结论 | 理由 |
+| --- | --- | --- |
+| 改后端加 OAuth / device-code 端点 | ✗ | 明确要求不侵入 narwhal-cms；为一个客户端改后端不值得 |
+| 读用户日常浏览器的 cookie 库 | ✗ | Chrome 127+ App-Bound 加密后读不出；且直接碰用户主 profile 风险大 |
+| **独立 profile + CDP 读 localStorage** | ✓ | 无需改后端；隔离自己的 profile；令牌只经本机 CDP，不经过模型；撤销=删目录 |
+
+**安全性质**：
+
+- 密码永不出现在 CLI 参数、环境变量、凭据文件或对话里（人是在浏览器里输入）。
+- 只读两个 localStorage 键，不读 cookie 库、不注入脚本到非本站页面。
+- 浏览器 profile 在 `<HOME>/browser`（`0700`），与用户日常浏览器完全隔离，可整体删除。
+- 撤销是**三件事**：调后端 `POST /api/cms/auth/jwt/logout`（尽力而为，失败也继续）→ 删本地凭据 → 删浏览器 profile（cookie 一起消失）。
+- `--keep-browser` 只清 token 保留 profile，适合「换一个论坛账号但不重新输密码」。
+
+**兼容与降级**：
+
+- 无 Chromium 系浏览器 / Node < 22 / 无图形界面 → `login --password`（沿用第 6.1 节）。
+- 已有 token（从任何地方拿到）→ `token set --access ...` / `NARWHAL_FORUM_TOKEN`。
+- MCP 侧：`login` 工具 `mode=browser`（默认）会真的打开浏览器；Agent 只在用户要求或写操作报鉴权错时调用。
+- 安装时不弹窗：npm `postinstall` 不该开浏览器，所以入口是 `narwhal-forum setup` / `login`。
+
+### 6.1 账号密码登录（`--password`）
+
+```text
+GET  /api/cms/auth/narwhal/code   → 裸 base64 DER 公钥（normalizePublicKey 转 PEM/SPKI）
+POST /api/cms/auth/narwhal/login
+     body:      base64( AES-256-ECB( JSON{username,password,captchaToken?} , aesKey ) )
+     encryptKey: base64( RSA-PKCS1v1.5( base64(aesKey) ) )
+     → access_token / refresh_token
+```
+
+- AES key 由 `crypto.randomUUID()` 去横线得到（32 个 ASCII 字符 → 256 位），每次登录现生成。
+- token 保存：`onTokens` 回调 + `persist` 时原子写 `credentials.json`（`0600`）。
+- 401 处理：有 refresh token 就**单飞刷新**（`_refreshing` 共享同一个 Promise）并重放一次原请求，
+  `_retried` 标记防死循环；刷新失败按未登录上报。
+- 后端路径双形态：`/api/cms/auth/**` 由 `CmsProxyController` 转发到 `/api/auth/**`，
+  两种写法都通（本项目统一用前台形态 `/api/cms/...`）。
+
+### 6.2 授权前的风险提示（人审在环路的第一步）
+
+授权是整条信任链的入口，风险必须在这里摊开，而不是等出事再解释。实现（`src/risk.js`）：
+
+- 8 条风险：内容责任在账号 / AI 不能自行发布 / 自动化有风控风险 / 只用本人权限 / 未实名不能发布 / 凭据本机可撤销 / 图片与外链 / 操作留痕；
+- 版本化文案 `RISK_VERSION`，同意写进凭据文件（`riskAcceptedVersion`、`riskAcceptedAt`），文案升级后重新征求同意；
+- **非交互不得静默授权**：stdin/stdout 不是 TTY 且未同意过时直接拒绝（退出码 2），必须显式 `--yes`；
+- MCP 侧 `login` 首次调用只返回风险全文 + `E_RISK_ACK_REQUIRED`，不打开浏览器；模型必须把全文给人看，人确认后再带 `acknowledgeRisks: true`；
+- `logout` 清凭据时同意记录一并消失（下次重新征求）。
+
+### 6.3 人审发布：草稿 + 一次性 approvalToken（P0）
+
+约束 A（AI 内容必须人审）在实现上不能靠「约定」，只能靠**令牌**：批准是一个只有人能执行的动作，执行结果是一个密码学凭据；发布只认凭据。
+
+状态机（`src/draft.js`）：
+
+```
+created → pending_review → approved │ rejected
+                    │            │
+                    │            └→ published（token 消费）
+                    └→ expired（10min 未批准/未发布）
+```
+
+- **内容指纹**：`draftHash = sha256(canonical({kind, payload}))`，key 排序后序列化，所以「同内容不同 key 顺序」hash 相同、「改一个字」hash 必变。批准时写入 `record.approval.draftHash`，发布时重算比对 → 防「批准 A、发布 B」。
+- **token 结构**：`nfap_<draftId>.<nonce>.<expMs>.<draftHash>.<action>.<userId>.<sig>`，`sig = HMAC-SHA256(approval.key, parts.join('|'))`（base64url 截 43 字符）。
+- **落盘只存 hash**：`record.approval.tokenHash = sha256(token)`（不是 token 本体），所以就算草稿目录被读，也拿不到可用凭据；`approval.key` 单独 0600 存放。
+- **校验顺序**（短路，先便宜后昂贵）：REQUIRED → USED → STATUS → INVALID(格式) → EXPIRED → INVALID(签名，timingSafeEqual) → HASH_MISMATCH → ACTION → USER → INVALID(hash 对不上)。
+- **一次性**：发布成功后 `markPublished` 写 `usedAt`；任何重放命中 `E_APPROVAL_USED`。失败（网络/权限/实名）**不消费** token，可重试 —— 这是刻意的：卡住人不如卡住重放。
+- **TTL 与降级**：`APPROVAL_TTL_MS = 10min`；`readDraft` 见到「approved 但已过期且未使用」就改写为 `expired`，列表里不会出现「看起来还能发」的死草稿。
+- **批准只能在 TTY**：`draft approve` 要求 stdin+stdout 都是 TTY，展示全文后要求输入 `yes`；非 TTY 一律退出码 2，状态不变。MCP 工具表里**刻意不存在** approve/accept/confirm 类工具（有测试守住这条）。
+- **实名强校验**：发布前 `realnameStatus()` 现查（不走缓存），`verified === false` → 退出码 3 + `E_REALNAME_REQUIRED`，且不消费 token；`verified === null`（接口没给字段）时不拦，以服务端门控为准，不臆测。
+
+为什么不用「--force / --yes 二次确认」：确认只发生在发起方进程里，Agent 完全可以自己补一个 `--yes`。人审必须在**另一个主体**上发生，所以凭据是跨进程传的 token，而不是同进程的 flag。
+
+## 7. 错误模型
+
+`ForumError { code, status, detail, hint }` / `ForumAuthError`（extends）。
+
+- 网络层：`ECONNREFUSED` 等翻译成「连不上论坛后端 + 地址 + 是否启动」的提示。
+- HTTP 层：非 2xx 且非 JSON-RPC envelope → 带状态码的错误。
+- 业务层：后端 message 中文化 + 归类（`cooldown` → 15 秒冷却、`realname`、`mobile`、`slowmode`、`locked`、`sensitive`）。
+- MCP 层：工具失败不进 JSON-RPC 错误，而是 `result.isError = true` + 可读文本，让 Agent 能自我纠正（例如换参数重试）而不是崩掉会话。
+
+## 8. 测试策略
+
+- `test/mock-forum.js`：用 `node:http` 实现契约级 mock（RSA 2048 密钥对、AES 解密登录体、
+  envelope、401、Q_ 过滤、评论树、15 秒冷却开关、表情白名单、发帖）。
+- 78 个用例分八层：客户端（16）、MCP 协议 + 端到端子进程（11）、CLI（9）、浏览器授权纯函数与撤销（13）、MCP login/logout 契约（4）、授权前风险提示（5）、浏览器授权端到端（1）、人审发布状态机（19）。
+- 人审发布层（`test/draft.test.js`）不只测 happy path：重放、TTL、改内容、篡改签名、换用户、换动作、非 TTY 批准、实名拦截、MCP 无 token 全都有用例；其中「TOOLS 里没有 approve 类工具」是**反向断言**，防止以后有人好心加回来。
+- 批准的成功路径用 `approveDraftInteractive(id, io)` 的**注入式假 TTY** 覆盖（io 只为可测试性存在，不传 io 时一律读真实 `process` 的 TTY；没有环境变量或 CLI 参数能绕过）：假 TTY + 输入 `yes` → 拿到 token 且 token 真能通过校验；输入 `no` → 取消且不落任何 token 记录。
+- 浏览器授权不打真浏览器：`waitForTokens(evaluate)` 把「怎么取 token」抽成可注入函数，用假 evaluate 覆盖成功 / 超时 / 浏览器被关；`revokeAuth(backend:false)` 在临时 `NARWHAL_FORUM_HOME` 里验证凭据与 profile 都被删掉。
+- 覆盖的关键回归：匿名列表不泄露未审核帖、未登录评论报鉴权错、密码不落盘、
+  401 自动刷新重放、stdout 协议纯净、工具失败 isError。
+
+## 9. 与 dsh 的接线
+
+```yaml
+- insert:
+    - id: narwhal-forum-mcp
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: narwhal-forum
+        transport: stdio
+        command: npx          # 或 narwhal-forum / node
+        args: [-y, narwhal-forum, mcp]
+```
+
+- `serverName` 决定工具前缀：`mcp__narwhal-forum__list_posts`；
+- 安装走 `plugin_manager action=install_bundle target=<包目录>`，不手改 profile 的
+  `package.json` / `cordis.patch.yml`，也不在 profile 里跑包管理器；
+- `failOnStartupError: false`：MCP server 起不来时 dsh 仍能启动，只是没有这些工具；
+- 环境变量被 dsh 清洗过，所以**认证信息不放环境变量**，放 `~/.config/narwhal-forum/credentials.json`，
+  该路径不依赖进程环境。这也是为什么 bundle 里不需要 `env` 直通。
+
+## 10. 后续可做（当前未实现）
+
+| 能力 | 状态 | 说明 |
+| --- | --- | --- |
+| 图片/附件上传 | 未实现 | 需要 multipart + 存储后端配置，超出「读+评论」的最小闭环 |
+| 通知 / 私信 | 未实现 | 后端接口存在，但需确认权限与隐私边界 |
+| 收藏 / 关注列表 | 未实现 | 与点赞同一层，接口确定后再加，避免猜 |
+| 发帖编辑器字段（封面、摘要） | 部分 | 已透传 `summary/type/cover`，未做上传校验 |
+| 图片评论 | 未实现 | 评论实体 `GeneratedBbsComment` 无图片列；三条路线（A 文本内联 / B 后端加 `images_` 列 / C 不做）待评审，见方案 |
+| 人审记录审计（谁批的、何时批） | 未实现 | 当前只存 `reviewer` 字段；要可追溯需落地审计日志 |
+
+## 11. 待确认
+
+1. GitHub 私有仓库的最终名字与账号（暂按 `sasazhang2333/narwhal-forum`）。
+2. 是否发布到 npm（公开 or 私有 registry）；不发布时 dsh 用本地 patch 变体。
+3. 论坛是否在登录时启用验证码 / 双因素 —— 启用时 CLI 登录会返回结构化错误码，需改用 token 导入。

@@ -1,0 +1,56 @@
+{
+  "name": "narwhal-forum",
+  "version": "0.4.0",
+  "description": "Narwhal CMS 论坛能力包：MCP server + CLI，让 dsh / Codex / Claude Code 等工具读取帖子、发表评论并执行其它论坛操作。登录走网页授权（先展示风险提示并取得本人确认，授权一次，可撤销）。",
+  "type": "module",
+  "bin": {
+    "narwhal-forum": "bin/narwhal-forum.js",
+    "nf": "bin/narwhal-forum.js"
+  },
+  "exports": {
+    ".": "./src/index.js",
+    "./mcp": "./src/mcp/server.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "bin/",
+    "src/",
+    "locale/",
+    "icon.svg",
+    "cordis.patch.yml",
+    "README.md",
+    "DESIGN.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18.17"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "scripts": {
+    "test": "node --test \"test/*.test.js\"",
+    "test:mcp": "node test/mcp.test.js",
+    "mcp:inspect": "node test/mcp-inspect.js",
+    "mcp": "node bin/narwhal-forum.js mcp"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "dsh",
+    "claude-code",
+    "codex",
+    "forum",
+    "narwhal",
+    "browser-login",
+    "authorization"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sasazhang2333/narwhal-forum.git"
+  }
+}

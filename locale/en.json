@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Narwhal Forum",
+    "description": "Connects the narwhal-forum MCP server so the agent can browse posts, read threads and post comments on the forum."
+  }
+}
