@@ -130,3 +130,40 @@ test('未知命令非零退出，--json 错误可被解析', async () => {
   assert.equal(j.code, 1);
   assert.match(j.stdout, /"error"/);
 });
+
+test('login --device：打印的是一份真实存在的凭据文件，不是 undefined', async () => {
+  // 真机上出现过「凭据已写入 undefined」：patchCredentials 返回的是路径字符串，
+  // 老代码却读 saved.path。这条测试盯住输出里的路径与磁盘一致。
+  const { spawn } = await import('node:child_process');
+  const devHome = fs.mkdtempSync(path.join(os.tmpdir(), 'narwhal-forum-device-'));
+  const env = { ...process.env, NARWHAL_FORUM_HOME: devHome, NARWHAL_FORUM_BASE_URL: mock.baseUrl };
+  try {
+    const child = spawn(process.execPath, [BIN, 'login', '--device', '--accept-risk',
+      '--timeout-sec', '20', '--browser', 'false'], { env });
+    let stdout = '';
+    let stderr = '';
+    let approved = false;
+    child.stdout.on('data', (d) => { stdout += d; });
+    child.stderr.on('data', (d) => {
+      stderr += d;
+      const m = /授权码：(\S{4}-\S{4})/.exec(stderr);
+      if (m && !approved) {
+        approved = true;
+        for (const entry of mock.state.deviceCodes.values()) {
+          if (entry.userCode === m[1]) entry.status = 'approved';
+        }
+      }
+    });
+    const code = await new Promise((resolve) => child.on('exit', resolve));
+    assert.equal(code, 0, stderr.slice(-400));
+    assert.ok(!stdout.includes('undefined'), '输出里不该出现 undefined: ' + stdout);
+    const m = /凭据已写入 (\S+?\.json)/.exec(stdout);
+    assert.ok(m, '必须打印凭据路径: ' + stdout);
+    assert.ok(fs.existsSync(m[1]), '打印的路径必须真实存在: ' + m[1]);
+    const creds = JSON.parse(fs.readFileSync(m[1], 'utf8'));
+    assert.equal(creds.authMode, 'device');
+    assert.equal(creds.accessToken, ACCESS_TOKEN);
+  } finally {
+    fs.rmSync(devHome, { recursive: true, force: true });
+  }
+});
