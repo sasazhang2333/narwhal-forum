@@ -10,6 +10,7 @@
 import readline from 'node:readline';
 import { TOOL_MAP, toolList } from './tools.js';
 import { ForumClient } from '../client.js';
+import { checkScope, scopeError, SCOPE_FREE_TOOLS } from '../consent.js';
 
 import { readFileSync } from 'node:fs';
 
@@ -107,6 +108,11 @@ export class ForumMcpServer {
           if (!tool) throw new RpcError(-32602, 'Unknown tool: ' + String(name), { available: [...TOOL_MAP.keys()] });
           this.log('tools/call', name);
           try {
+            // 授权范围闸：登录时人只给了一部分范围，就别让 Agent 越界。
+            if (!SCOPE_FREE_TOOLS.has(name)) {
+              const info = checkScope(name);
+              if (!info.ok) throw scopeError(name, info);
+            }
             const out = await tool.handler({ client: this.client, config: this.client.cfg }, args);
             const payload = {
               content: [{ type: 'text', text: clip(out.text) }],

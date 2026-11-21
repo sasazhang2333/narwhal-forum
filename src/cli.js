@@ -12,6 +12,7 @@ import { clearCredentials, patchCredentials, readCredentials, resolveConfig } fr
 import { createDraft, readDraft, listDrafts, removeDraft, approveDraft, rejectDraft, verifyApprovalToken, markPublished, summarizeDrafts } from './draft.js';
 import { readFileSync } from 'node:fs';
 import { RISK_VERSION, RISK_ITEMS, riskNoticeText, riskSummaryText, riskAcknowledged, riskConsentPatch } from './risk.js';
+import { SCOPES, ALL_SCOPE_IDS, parseScopeList, scopeNoticeText, scopeSummary, readGrant } from './consent.js';
 import { resolveImageList, verifyDraftImages, summarizeImages, contentWithImages, ImageError } from './images.js';
 import { TOOLS, TOOL_MAP } from './mcp/tools.js';
 
@@ -30,6 +31,7 @@ const HELP = [
   '  logout                 撤销授权：后端登出 + 删除本地凭据 + 删除插件浏览器 profile',
   '  auth status            查看授权状态（是否登录、授权方式、浏览器 profile 位置）',
   '  risk                   授权前必读的风险提示（每次 login/setup 也会先打印）',
+  '  scope [set ...]        查看/修改授权范围（read, write:comment, write:post, moderate, delete, draft）',
   '  token set|show|clear   直接管理 token（适合从浏览器复制 access_token）',
   '  whoami                 当前登录用户信息',
   '',
@@ -60,7 +62,7 @@ const HELP = [
   '  call <tool> --json <p> 直接调用任意能力（逃生舱，参数为 JSON）',
   '',
   '全局选项: --base-url --token --refresh-token --timeout --json --debug --help --version',
-  '登录相关: --password --username --browser <路径> --timeout-sec <秒> --keep-browser --yes',
+  '登录相关: --password --username --browser <路径> --timeout-sec <秒> --keep-browser --yes --scope <列表>',
   '',
   '环境变量: NARWHAL_FORUM_BASE_URL, NARWHAL_FORUM_TOKEN, NARWHAL_FORUM_REFRESH_TOKEN,',
   '          NARWHAL_FORUM_USERNAME, NARWHAL_FORUM_PASSWORD, NARWHAL_FORUM_HOME',
@@ -175,6 +177,11 @@ async function runTool(command, flags, positionals) {
     args[argName] = value;
   }
   const tool = TOOL_MAP.get(spec.tool);
+  const { checkScope, scopeError, SCOPE_FREE_TOOLS } = await import('./consent.js');
+  if (!SCOPE_FREE_TOOLS.has(spec.tool)) {
+    const info = checkScope(spec.tool);
+    if (!info.ok) throw scopeError(spec.tool, info);
+  }
   const client = clientFrom(flags);
   const out = await tool.handler({ client }, args);
   if (flags.json) {
@@ -249,10 +256,44 @@ async function ensureRiskConsent(flags, ctx) {
   riskConsentDone = true;
   return 0;
 }
+/** 授权前确认范围：--scope 显式给 → 用它；非交互（脚本/CI）→ 全量；交互 → 展示清单并问一句。 */
+async function resolveScopesInteractive(flags) {
+  if (flags.scope !== undefined) return parseScopeList(typeof flags.scope === 'string' ? flags.scope : 'all');
+  if (flags.yes === true || !process.stdin.isTTY || !process.stdout.isTTY) return [...ALL_SCOPE_IDS];
+  process.stdout.write('\n' + scopeNoticeText() + '\n');
+  const answer = (await askLine('允许以上全部范围？回车=全部 / 输入 scope 列表（如 read,write:comment）/ n=只读： ')).trim();
+  if (!answer) return [...ALL_SCOPE_IDS];
+  if (/^(n|no|只读)$/i.test(answer)) return ['read'];
+  return parseScopeList(answer);
+}
+
+/** 把授权范围写进凭据文件（0600），auth status / status 都能看到。 */
+function recordScopes(scopes) {
+  patchCredentials({ grantedScopes: scopes, scopesGrantedAt: new Date().toISOString() });
+}
+
+async function cmdScope(sub, flags, rest = []) {
+  const current = readGrant(readCredentials());
+  if (sub === 'set' || flags.set !== undefined) {
+    const scopes = parseScopeList(rest.length ? rest : (sub && sub !== 'set' ? sub : flags.set));
+    recordScopes(scopes);
+    process.stdout.write('授权范围已更新: ' + scopeSummary(scopes) + '\n');
+    return 0;
+  }
+  const lines = ['授权范围: ' + scopeSummary(current ? current.scopes : null)];
+  if (current && current.grantedAt) lines.push('授予时间: ' + current.grantedAt);
+  lines.push('', scopeNoticeText(current ? current.scopes : null));
+  lines.push('', '改范围: narwhal-forum scope set read,write:comment   （或重新 login）');
+  process.stdout.write(lines.join('\n') + '\n');
+  return 0;
+}
+
 async function cmdLogin(flags) {
   const client = clientFrom(flags);
   const consent = await ensureRiskConsent(flags, { baseUrl: client.baseUrl });
   if (consent !== 0) return consent;
+  // 授权范围：默认全给；也可以 --scope read,write:comment 只给一部分（或交互里选）
+  const scopes = await resolveScopesInteractive(flags);
   // 账号密码模式：显式 --password / --mode password，或给了 --username 且有密码来源（兼容旧用法）
   const passwordMode = flags.password !== undefined
     || flags.mode === 'password'
@@ -263,7 +304,8 @@ async function cmdLogin(flags) {
       password: typeof flags.password === 'string' ? flags.password : undefined,
       captchaToken: flags['captcha-token'],
     });
-    process.stdout.write((flags.json ? JSON.stringify(result, null, 2) : '登录成功：' + result.accessToken + '\n凭据已写入 ' + result.credentialsPath + '\nrefresh token 会自动续期，access token 默认 30 分钟过期。') + '\n');
+    recordScopes(scopes);
+    process.stdout.write((flags.json ? JSON.stringify({ ...result, grantedScopes: scopes }, null, 2) : '登录成功：' + result.accessToken + '\n凭据已写入 ' + result.credentialsPath + '\nrefresh token 会自动续期，access token 默认 30 分钟过期。\n授权范围: ' + scopeSummary(scopes)) + '\n');
     return 0;
   }
 
@@ -274,6 +316,7 @@ async function cmdLogin(flags) {
     browserPath: flags.browser,
     log: (line) => process.stderr.write('· ' + line + '\n'),
   });
+  recordScopes(scopes);
   const summary = {
     authenticated: true,
     authMode: 'browser',
@@ -281,12 +324,14 @@ async function cmdLogin(flags) {
     credentialsPath: r.credentialsPath,
     browserProfile: r.profileDir,
     browser: r.browser,
+    grantedScopes: scopes,
   };
   process.stdout.write((flags.json
     ? JSON.stringify(summary, null, 2)
     : ['授权成功（网页登录）',
       '凭据已写入 ' + r.credentialsPath + '（0600，已含 refresh token）',
       '浏览器 profile: ' + r.profileDir + '（撤销授权时会一并删除）',
+      '授权范围: ' + scopeSummary(scopes),
       '撤销方式: narwhal-forum logout',
       '',
       '下一步: 在 dsh / Claude Code / Codex 里直接调论坛能力（MCP 工具名 mcp__narwhal-forum__*）。'].join('\n')) + '\n');
@@ -717,6 +762,7 @@ export async function main(argv = process.argv.slice(2)) {
     if (command === 'login') return await cmdLogin(flags);
     if (command === 'logout') return await cmdLogout(flags);
     if (command === 'auth') return await cmdAuth(rest[0], flags);
+    if (command === 'scope') return await cmdScope(rest[0], flags, rest.slice(1));
     if (command === 'setup') return await cmdSetup(flags);
     if (command === 'risk') return await cmdRisk(flags);
     if (command === 'draft') return await cmdDraft(rest[0], flags, rest.slice(1));

@@ -6,6 +6,7 @@
  */
 import { REACTIONS, POST_ORDERS, flattenComments, countComments } from '../client.js';
 import { RISK_VERSION, riskNoticeText, riskAcknowledged, riskConsentPatch } from '../risk.js';
+import { parseScopeList, scopeNoticeText, scopeSummary, readGrant } from '../consent.js';
 import { patchCredentials, readCredentials } from '../config.js';
 import { createDraft, readDraft, listDrafts, removeDraft, verifyApprovalToken, markPublished } from '../draft.js';
 import { resolveImageList, verifyDraftImages, summarizeImages, contentWithImages, MAX_IMAGES } from '../images.js';
@@ -185,6 +186,7 @@ export const TOOLS = [
           '登录状态: ' + (s.authenticated ? '已登录' : '未登录（只读操作可用）'),
           'access token: ' + (s.accessToken || '无'),
           'refresh token: ' + (s.refreshToken || '无'),
+          '授权范围: ' + (() => { const g = readGrant(); return g ? scopeSummary(g.scopes) : '未记录（旧凭据，按全量处理）'; })(),
           '凭据文件: ' + s.credentialsPath,
           '超时: ' + s.timeoutMs + 'ms',
         ].join('\n'),
@@ -204,13 +206,15 @@ export const TOOLS = [
       password: S.str('mode=password 时的密码（不落盘，可用环境变量 NARWHAL_FORUM_PASSWORD 代替）'),
       captchaToken: S.str('若后端开启了图形验证码，可传入已获得的校验票据'),
       acknowledgeRisks: S.bool('是否已把风险提示展示给用户并取得明确同意（默认 false：不打开浏览器，只返回风险全文）', { default: false }),
+      scopes: S.str('授权范围（默认 all）：all / read / read:own / write:comment / write:post / moderate / delete / draft，可逗号组合', { default: 'all' }),
     }),
     async handler(ctx, args) {
       const mode = args.mode || 'browser';
       if (args.acknowledgeRisks !== true) {
         const acked = riskAcknowledged(readCredentials());
         return {
-          text: riskNoticeText({ baseUrl: ctx.client.baseUrl, mode }) + '\n' + '\n' +
+          text: riskNoticeText({ baseUrl: ctx.client.baseUrl, mode }) + '\n\n' +
+            scopeNoticeText(parseScopeList(args.scopes)) + '\n' + '\n' +
             (acked
               ? '该账号此前已同意过 v' + RISK_VERSION + '，但仍请把上面的风险提示再看一遍；确认后带 acknowledgeRisks=true 重新调用以打开浏览器。'
               : '以上是授权前的风险提示。请把全文展示给用户，取得明确同意后，再带 acknowledgeRisks=true 重新调用；不要自行假设用户已同意。'),
@@ -218,11 +222,13 @@ export const TOOLS = [
         };
       }
       patchCredentials(riskConsentPatch());
+      const grantedScopes = parseScopeList(args.scopes);
       if (mode === 'password') {
         const r = await ctx.client.login(args);
+        patchCredentials({ grantedScopes, scopesGrantedAt: new Date().toISOString() });
         return {
-          text: '登录成功：' + r.accessToken + '\n凭据已写入 ' + r.credentialsPath + '（refresh token 可自动续期）。\n风险提示已记录（v' + RISK_VERSION + '）；撤销授权调用 logout。',
-          data: r,
+          text: '登录成功：' + r.accessToken + '\n凭据已写入 ' + r.credentialsPath + '（refresh token 可自动续期）。\n风险提示已记录（v' + RISK_VERSION + '）；授权范围: ' + scopeSummary(grantedScopes) + '；撤销授权调用 logout。',
+          data: { ...r, grantedScopes },
         };
       }
       const { browserLogin } = await import('../auth.js');
@@ -233,9 +239,10 @@ export const TOOLS = [
         log: (line) => process.stderr.write('[narwhal-forum] ' + line + '\n'),
       });
       ctx.client.setTokens({ accessToken: r.accessToken, refreshToken: r.refreshToken });
+      patchCredentials({ grantedScopes, scopesGrantedAt: new Date().toISOString() });
       return {
-        text: '授权成功（浏览器登录）\n凭据: ' + r.credentialsPath + '\n浏览器 profile: ' + r.profileDir + '\n撤销: 调用 logout，或运行 narwhal-forum logout',
-        data: { authenticated: true, authMode: 'browser', profileDir: r.profileDir, credentialsPath: r.credentialsPath },
+        text: '授权成功（浏览器登录）\n凭据: ' + r.credentialsPath + '\n浏览器 profile: ' + r.profileDir + '\n授权范围: ' + scopeSummary(grantedScopes) + '\n撤销: 调用 logout，或运行 narwhal-forum logout',
+        data: { authenticated: true, authMode: 'browser', profileDir: r.profileDir, credentialsPath: r.credentialsPath, grantedScopes },
       };
     },
   },

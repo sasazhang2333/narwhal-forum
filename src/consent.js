@@ -1,0 +1,169 @@
+/**
+ * 授权范围（scope）与「允许/拒绝」闸。
+ *
+ * 为什么需要这一层：网页授权把「登录」和「授权」合并成了一步 —— 人在专用浏览器窗口里登录完，
+ * 插件就把 token 读走了，中间没有「这个工具能做什么」的确认。这里补上那一步：
+ *
+ *   1. 授权时明确列出范围（读 / 评论 / 发帖 / 审核 / 删除 / 草稿），人可以选择只给一部分；
+ *   2. 每个工具都映射到一个范围，调用时先查本地授权记录，越界直接拒绝并说明怎么扩权；
+ *   3. 记录写进凭据文件（0600），`auth status` 能看到，重新登录可以改。
+ *
+ * ⚠️ 边界要说清楚：这是**客户端自律**的闸。token 本身是账号全权令牌，后端不知道我们授予了哪些
+ * 范围 —— 因此它拦住的是「Agent 顺手做了你没想到的事」，不是「攻击者拿到文件后越权」。
+ * 真正的服务端 scope 需要后端发一层受限 token（见 DESIGN 里「待确认」一节）。
+ */
+import { readCredentials } from './config.js';
+
+/** 授权范围表：id 进凭据文件，title/detail 进给人看的说明。 */
+export const SCOPES = [
+  {
+    id: 'read',
+    title: '读取公开内容',
+    detail: '浏览帖子、评论树、分类、栏目、全文搜索（这些未登录也能看）',
+  },
+  {
+    id: 'read:own',
+    title: '读取我的数据',
+    detail: '查看当前登录账号（whoami）、我发过的评论',
+  },
+  {
+    id: 'write:comment',
+    title: '评论与互动',
+    detail: '发表评论/回复、上传图片（含带图评论）、点赞表情',
+  },
+  {
+    id: 'write:post',
+    title: '发帖',
+    detail: '新建帖子（新账号/未达信任阈值会进待审，不会直接公开）',
+  },
+  {
+    id: 'moderate',
+    title: '审核',
+    detail: '批准待审帖子（后端仍会校验版主/管理员权限）',
+  },
+  {
+    id: 'delete',
+    title: '删除',
+    detail: '删除自己的帖子或评论（不可撤销；后端会校验作者身份）',
+  },
+  {
+    id: 'draft',
+    title: '人审草稿',
+    detail: '创建/查看本地草稿（发布仍需人在终端 draft approve，这一层插件自己也不会放行）',
+  },
+];
+
+export const ALL_SCOPE_IDS = SCOPES.map((s) => s.id);
+
+/** 工具 → 范围。没列到的工具（status/login/logout/auth 类）不需要授权。 */
+export const TOOL_SCOPES = {
+  list_posts: 'read',
+  get_post: 'read',
+  list_comments: 'read',
+  list_categories: 'read',
+  list_channels: 'read',
+  search_posts: 'read',
+  whoami: 'read:own',
+  my_comments: 'read:own',
+  upload_image: 'write:comment',
+  create_comment: 'write:comment',
+  react_post: 'write:comment',
+  create_post: 'write:post',
+  approve_post: 'moderate',
+  delete_comment: 'delete',
+  delete_post: 'delete',
+  draft_create: 'draft',
+  draft_list: 'draft',
+  draft_get: 'draft',
+  draft_publish: 'draft',
+  draft_discard: 'draft',
+};
+
+/** 不需要任何范围就能用的工具（授权、撤销、看状态）。 */
+export const SCOPE_FREE_TOOLS = new Set(['status', 'login', 'logout', 'whoami', 'auth_status']);
+
+const SCOPE_IDS = new Set(ALL_SCOPE_IDS);
+
+/**
+ * 解析用户给的 scope 列表：接受 `all`、逗号分隔的 id、或者数组。
+ * 未知 id 直接报错（宁可拦下，也不要静默忽略拼错的范围名 —— 那会让人以为扩了权）。
+ */
+export function parseScopeList(input) {
+  if (input === undefined || input === null || input === '') return [...ALL_SCOPE_IDS];
+  if (Array.isArray(input)) return parseScopeList(input.join(','));
+  const raw = String(input).trim();
+  if (!raw || raw === 'all' || raw === '*') return [...ALL_SCOPE_IDS];
+  const out = [];
+  const unknown = [];
+  for (const piece of raw.split(',').map((s) => s.trim()).filter(Boolean)) {
+    if (piece === 'all' || piece === '*') return [...ALL_SCOPE_IDS];
+    if (!SCOPE_IDS.has(piece)) unknown.push(piece);
+    else if (!out.includes(piece)) out.push(piece);
+  }
+  if (unknown.length) {
+    const err = new Error('未知的授权范围：' + unknown.join(', ') + '（可用：' + ALL_SCOPE_IDS.join(', ') + ' 或 all）');
+    err.code = 'E_SCOPE_UNKNOWN';
+    throw err;
+  }
+  return ALL_SCOPE_IDS.filter((id) => out.includes(id));
+}
+
+/** 读本地授权记录；旧凭据（没记录过范围）返回 null，由调用方按「全量」兼容处理。 */
+export function readGrant(creds) {
+  const c = creds || readCredentials();
+  const scopes = Array.isArray(c && c.grantedScopes) ? c.grantedScopes.filter((s) => SCOPE_IDS.has(s)) : null;
+  if (!scopes || !scopes.length) return null;
+  return { scopes, grantedAt: c.scopesGrantedAt || null, legacy: false };
+}
+
+/**
+ * 查某个工具在当前授权下能不能用。
+ * 旧凭据（没有 grantedScopes）按全量放行并标记 legacy —— 升级路径不该让老用户突然不能发帖。
+ */
+export function checkScope(toolName, creds) {
+  const need = TOOL_SCOPES[toolName];
+  if (!need) return { ok: true, need: null, grant: readGrant(creds) };
+  const grant = readGrant(creds);
+  if (!grant) {
+    return { ok: true, need, grant: null, legacy: true };
+  }
+  const ok = grant.scopes.includes(need);
+  return { ok, need, grant };
+}
+
+/** 越界时的错误对象：带上「怎么扩权」，别只甩一句没权限。 */
+export function scopeError(toolName, info) {
+  const scope = SCOPES.find((s) => s.id === info.need);
+  const granted = info.grant ? info.grant.scopes.join(', ') : '（未记录）';
+  const err = new Error(
+    '当前授权不含「' + (scope ? scope.title : info.need) + '」（' + info.need + '）：' +
+    '已授权范围 = ' + granted + '。'
+  );
+  err.code = 'E_SCOPE_DENIED';
+  err.hint = '要扩权请重新授权：narwhal-forum login（或在 dsh 里调用 login 工具带 scopes）。只读内容不需要授权。';
+  err.scope = info.need;
+  err.grantedScopes = info.grant ? info.grant.scopes : [];
+  return err;
+}
+
+/** 给人看的范围清单（授权前展示 / auth status 用）。 */
+export function scopeNoticeText(scopes) {
+  const list = scopes && scopes.length ? scopes : ALL_SCOPE_IDS;
+  const lines = ['本次授权范围（可只给其中一部分）：'];
+  for (const s of SCOPES) {
+    if (!list.includes(s.id)) continue;
+    lines.push('  · ' + s.title + '（' + s.id + '）：' + s.detail);
+  }
+  const missing = ALL_SCOPE_IDS.filter((id) => !list.includes(id));
+  if (missing.length) lines.push('  未授予：' + missing.join(', '));
+  return lines.join('\n');
+}
+
+/** 一行摘要（status / auth status 用）。 */
+export function scopeSummary(scopes) {
+  if (!scopes || !scopes.length) return '未记录（旧凭据，按全量处理）';
+  if (scopes.length === ALL_SCOPE_IDS.length) return '全部（' + ALL_SCOPE_IDS.join(', ') + '）';
+  return scopes.join(', ');
+}
+
+export const _internal = { SCOPE_IDS };

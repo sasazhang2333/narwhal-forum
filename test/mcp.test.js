@@ -308,3 +308,41 @@ test('tools/call 被门禁拦下时：保留 blockers（含 actionTo），不丢
     mock.state.gateComment = null;
   }
 });
+
+/* ------------------------------------ 授权范围闸（MCP 侧） */
+
+test('授权范围闸：只给 read 时 create_comment 被拒，isError 且说明怎么扩权', async () => {
+  const scopedHome = fs.mkdtempSync(path.join(os.tmpdir(), 'narwhal-forum-mcp-scope-'));
+  fs.writeFileSync(path.join(scopedHome, 'credentials.json'), JSON.stringify({
+    baseUrl: mock.baseUrl,
+    accessToken: ACCESS_TOKEN,
+    refreshToken: 'REFRESH_TOKEN',
+    grantedScopes: ['read'],
+  }));
+  const scoped = new Stdio(spawn(process.execPath, [BIN, 'mcp'], {
+    env: { ...process.env, NARWHAL_FORUM_HOME: scopedHome, NARWHAL_FORUM_BASE_URL: mock.baseUrl },
+    stdio: ['pipe', 'pipe', 'pipe'],
+  }));
+  try {
+    await scoped.call('initialize', {
+      protocolVersion: '2025-06-18',
+      capabilities: {},
+      clientInfo: { name: 'test', version: '0' },
+    });
+    const blocked = await scoped.tool('create_comment', { postId: '1', content: '不该发出去' });
+    assert.equal(blocked.isError, true);
+    assert.match(blocked.text, /当前授权不含「评论与互动」/);
+    assert.match(blocked.text, /narwhal-forum login/);
+
+    // 读类工具不受影响
+    const readOk = await scoped.tool('list_posts', { page: 1 });
+    assert.equal(readOk.isError, false, readOk.text);
+  } finally {
+    try {
+      scoped.proc.kill();
+    } catch {
+      /* ignore */
+    }
+    fs.rmSync(scopedHome, { recursive: true, force: true });
+  }
+});
