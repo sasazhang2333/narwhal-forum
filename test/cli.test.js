@@ -167,3 +167,39 @@ test('login --device：打印的是一份真实存在的凭据文件，不是 un
     fs.rmSync(devHome, { recursive: true, force: true });
   }
 });
+
+test('login --device：只写人勾选的范围（授权页勾掉的能力不会进凭据）', async () => {
+  // 真后端已经支持「页面上勾选」：authorize 带 scopes 子集，poll 回的是授予集。
+  // CLI 若仍把本地申请的全量写进 grantedScopes，等于绕过人的选择。
+  const { spawn } = await import('node:child_process');
+  const devHome = fs.mkdtempSync(path.join(os.tmpdir(), 'narwhal-forum-scoped-'));
+  const env = { ...process.env, NARWHAL_FORUM_HOME: devHome, NARWHAL_FORUM_BASE_URL: mock.baseUrl };
+  try {
+    const child = spawn(process.execPath, [BIN, 'login', '--device', '--accept-risk',
+      '--timeout-sec', '20', '--browser', 'false', '--scope', 'read,write:comment'], { env });
+    let stdout = '';
+    let stderr = '';
+    let acted = false;
+    child.stdout.on('data', (d) => { stdout += d; });
+    child.stderr.on('data', (d) => {
+      stderr += d;
+      const m = /授权码：(\S{4}-\S{4})/.exec(stderr);
+      if (!m || acted) return;
+      acted = true;
+      // 人在授权页上只勾「只读」，其余的勾掉
+      fetch(mock.baseUrl + '/api/cli/device/authorize', {
+        method: 'POST',
+        body: JSON.stringify({ userCode: m[1], decision: 'allow', scopes: ['read'] }),
+      }).catch(() => {});
+    });
+    const code = await new Promise((resolve) => child.on('exit', resolve));
+    assert.equal(code, 0, stderr.slice(-400));
+    const m = /凭据已写入 (\S+?\.json)/.exec(stdout);
+    assert.ok(m, '[REDACTED_STREET_141]: ' + stdout);
+    const creds = JSON.parse(fs.readFileSync(m[1], 'utf8'));
+    assert.deepEqual(creds.grantedScopes, ['read'], '只该写入人勾选的那一项');
+    assert.match(stdout, /授权范围: .*read/);
+  } finally {
+    fs.rmSync(devHome, { recursive: true, force: true });
+  }
+});

@@ -215,6 +215,32 @@ export async function startMockForum(options = {}) {
         expiresIn: 600, interval: 1, scopes: payload.scopes || [],
       }));
     }
+    if (method === 'POST' && pathname === '/api/cli/device/authorize') {
+      // 与真实后端一致：accept 人勾选的 scopes 子集；不传 scopes 表示「全给」
+      const payload = JSON.parse(body || '{}');
+      // 同一个 mock 里可能残留上一轮的码（userCode 是固定的），只认还没被处理的那条
+      const entry = [...state.deviceCodes.values()]
+        .filter((e) => e.userCode === payload.userCode)
+        .sort((a, b) => (a.status === 'pending' ? -1 : 1) - (b.status === 'pending' ? -1 : 1))[0];
+      if (!entry || entry.status !== 'pending') {
+        return send(200, failure('设备码不存在、已过期或已被使用'));
+      }
+      if (payload.decision === 'deny') {
+        entry.status = 'denied';
+        return send(200, envelope({ status: 'denied' }));
+      }
+      const requested = entry.scopes || [];
+      const granted = Array.isArray(payload.scopes)
+        ? requested.filter((s) => payload.scopes.includes(s))
+        : requested.slice();
+      if (!granted.length) {
+        return send(200, failure('请至少勾选一项能力，然后再点「允许」'));
+      }
+      entry.granted = granted;
+      entry.status = 'approved';
+      return send(200, envelope({ status: 'approved', clientName: entry.clientName, scopes: granted, userCode: entry.userCode }));
+    }
+
     if (method === 'GET' && pathname === '/api/cli/device/poll') {
       const deviceCode = url.searchParams.get('deviceCode');
       const entry = state.deviceCodes.get(deviceCode);
@@ -223,7 +249,7 @@ export async function startMockForum(options = {}) {
         const n = (state.devicePollCount.get(deviceCode) || 0) + 1;
         state.devicePollCount.set(deviceCode, n);
         // 第 2 次轮询之前由测试主动 approve
-        return send(200, envelope({ status: 'pending', userCode: entry.userCode, clientName: entry.clientName, scopes: entry.scopes, expiresIn: 600, interval: 1 }));
+        return send(200, envelope({ status: 'pending', userCode: entry.userCode, clientName: entry.clientName, scopes: entry.granted || entry.scopes, expiresIn: 600, interval: 1 }));
       }
       if (entry.status === 'approved') {
         entry.status = 'consumed';
@@ -234,7 +260,7 @@ export async function startMockForum(options = {}) {
           username: 'admin',
           userId: '1',
           clientName: entry.clientName,
-          scopes: entry.scopes,
+          scopes: entry.granted || entry.scopes,
           userCode: entry.userCode,
         }));
       }

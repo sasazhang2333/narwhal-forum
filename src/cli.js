@@ -323,20 +323,22 @@ async function cmdLogin(flags) {
       openBrowser: flags.browser !== false,
       log: (line) => process.stderr.write(line ? line + '\n' : '\n'),
     });
+    // 授权页允许人勾掉一些能力：以服务端回的授予集为准（拿不到才退回本地申请的范围）
+    const granted = Array.isArray(r.scopes) && r.scopes.length ? r.scopes : scopes;
     const credentialsFile = patchCredentials({
       accessToken: r.accessToken,
       refreshToken: r.refreshToken,
       authMode: 'device',
-      grantedScopes: scopes,
+      grantedScopes: granted,
       scopesGrantedAt: new Date().toISOString(),
       loggedInAt: new Date().toISOString(),
     });
     process.stdout.write((flags.json
-      ? JSON.stringify({ authenticated: true, authMode: 'device', baseUrl: client.baseUrl, credentialsPath: credentialsFile, username: r.username, grantedScopes: scopes }, null, 2)
+      ? JSON.stringify({ authenticated: true, authMode: 'device', baseUrl: client.baseUrl, credentialsPath: credentialsFile, username: r.username, grantedScopes: granted }, null, 2)
       : ['授权成功（设备码）',
         '  账号: ' + (r.username || '(未知)'),
         '  凭据已写入 ' + credentialsFile + '（0600，已含 refresh token）',
-        '  授权范围: ' + scopeSummary(scopes),
+        '  授权范围: ' + scopeSummary(granted),
         '  撤销方式: narwhal-forum logout'].join('\n')) + '\n');
     return 0;
   }
