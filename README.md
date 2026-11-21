@@ -324,6 +324,34 @@ chmod +x ~/.dsh/bin/narwhal-forum-mcp
 > 不想用启动器也可以写死 node 绝对路径（`command: /Users/<you>/.nvm/versions/node/v24.14.0/bin/node`，
 > `args: [<profile>/node_modules/narwhal-forum/bin/narwhal-forum.js, mcp]`），代价是 nvm 换版本时要改这一行。
 
+<details>
+<summary>覆写没生效时（重启后仍然没有 <code>mcp__narwhal-forum__*</code>）</summary>
+
+同一 id 的覆写依赖 patch 层的先后顺序。万一版本升级后顺序变了、覆写被 bundle 层盖掉，
+就直接**把 bundle 那一行关掉、另起一个 id** —— 这招与顺序无关：
+
+```yaml
+# 1) 关掉包自带的那一行（只改 disabled，不动 config）
+- id: narwhal-forum-mcp
+  disabled: true
+
+# 2) 用另一个 id 插一条等价的
+- insert:
+    - id: narwhal-forum-mcp-local
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: narwhal-forum
+        transport: stdio
+        command: /Users/<you>/.dsh/bin/narwhal-forum-mcp
+        args: []
+        toolCallTimeoutMs: 60000
+        failOnStartupError: true
+        reconnect: { enabled: true, initialDelayMs: 500, maxDelayMs: 30000, maxAttempts: 10 }
+```
+
+`serverName` 必须保持不变（它决定工具前缀 `mcp__narwhal-forum__*`），只有 patch 行的 `id` 可以变。
+</details>
+
 ### Claude Code
 
 ```json
