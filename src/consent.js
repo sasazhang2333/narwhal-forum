@@ -12,7 +12,7 @@
  * 范围 —— 因此它拦住的是「Agent 顺手做了你没想到的事」，不是「攻击者拿到文件后越权」。
  * 真正的服务端 scope 需要后端发一层受限 token（见 DESIGN 里「待确认」一节）。
  */
-import { readCredentials } from './config.js';
+import { readCredentials, patchCredentials } from './config.js';
 
 /** 授权范围表：id 进凭据文件，title/detail 进给人看的说明。 */
 export const SCOPES = [
@@ -140,10 +140,50 @@ export function scopeError(toolName, info) {
     '已授权范围 = ' + granted + '。'
   );
   err.code = 'E_SCOPE_DENIED';
-  err.hint = '要扩权请重新授权：narwhal-forum login（或在 dsh 里调用 login 工具带 scopes）。只读内容不需要授权。';
+  err.hint = '要扩权可以在网页「设置 → 账号安全 → AI 工具授权」里给这个工具勾上对应能力（保存后下一次请求即生效），'
+    + '或者重新授权：narwhal-forum login（dsh 里调用 login 工具带 scopes）。只读内容不需要授权。';
   err.scope = info.need;
   err.grantedScopes = info.grant ? info.grant.scopes : [];
   return err;
+}
+
+/**
+ * 从服务端把「这条 cli 授权当前的能力集」同步回本地凭据。
+ *
+ * 为什么需要：范围一旦能在页面上随时收窄/放宽（服务端 CliScopeFilter 按 meta.scopes 实时校验），
+ * 本地凭据里那份 recorded 就只是缓存 —— 不收窄就会「服务端已收、本地还以为有」，
+ * 放宽了又会「服务端已放、本地还在拒」。这一步把它拉回来，于是**页面改完不用重启工具**：
+ * 收窄 → 下一次请求被服务端 403；放宽 → 下一次请求就被本地放行。
+ *
+ * 只对 cli 会话生效（`/api/bbs/me/sessions` 里 `current:true && deviceType==='cli'`）：
+ * 真人设备/密码登录没有「授权范围」这回事，不去动它。
+ *
+ * @returns {Promise<string[]|null>} 变化后的范围；没变化 / 不是 cli 会话 → null
+ */
+let lastScopeSync = 0;
+export async function syncGrantedScopes(client, { force = false, ttlMs = 15000 } = {}) {
+  const now = Date.now();
+  if (!force && now - lastScopeSync < ttlMs) return null;
+  lastScopeSync = now;
+  let rows;
+  try {
+    const result = await client.request('/api/bbs/me/sessions');
+    rows = Array.isArray(result && result.list) ? result.list : [];
+  } catch {
+    return null; // 拉不到就按本地缓存走，不因为一次网络抖动把工具锁死
+  }
+  const current = rows.find((r) => r && r.current === true && String(r.deviceType || '') === 'cli');
+  if (!current) return null;
+  const remote = String(current.scopes || '')
+    .split(',')
+    .map((x) => x.trim())
+    .filter((x) => SCOPE_IDS.has(x));
+  if (!remote.length) return null;
+  const local = (readCredentials() || {}).grantedScopes;
+  const same = Array.isArray(local) && local.length === remote.length && local.every((x) => remote.includes(x));
+  if (same) return null;
+  patchCredentials({ grantedScopes: ALL_SCOPE_IDS.filter((id) => remote.includes(id)) });
+  return remote;
 }
 
 /** 给人看的范围清单（授权前展示 / auth status 用）。 */

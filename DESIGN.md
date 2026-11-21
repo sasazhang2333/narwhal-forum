@@ -363,10 +363,21 @@ CLI、MCP（正文 + `structuredContent.error.blockers`）、`--json` 三个出�
 | `scopes` 只是**给人看**的意图声明 | 真权限仍由各接口判；不因为声明了 moderate 就获得审核权 |
 | 不用标准 OAuth2 authorize 端点 | 那要求站点做 client 注册、consent 管理、redirect 白名单；设备码三个接口就够，且天然适配 CLI/Agent |
 
-**边界**：这一层强制的是「一次人工确认 + 一张有时效的令牌」，不强制「服务端 token 只能读」。
-要做后者，得给 token 加 scope claim 并在 `SecurityConfig` 里按路径校验 —— 那是另一个改动，
-暂列在 §11 待确认（此前的硬约束是「不修改 narwhal-cms」，用户已明确放开，但服务端 scope 校验
-需要先定「哪些接口属于哪个 scope」，属于接口清单级的工作）。
+**边界**：这一层强制的是「一次人工确认 + 一张有时效的令牌」，令牌本身不带 scope claim。
+
+**1121 更新：服务端真校验已落地**（不再只是「客户端自律」）。做法不是给 token 加 claim，
+而是让服务端每次请求按**会话元数据**判定 —— `ActiveSessionStore` 的 `SessionMeta.scopes`
+是那条 cli 授权当前的范围，`CliScopeFilter`（挂在 `SingleSessionFilter` 之后）把请求映射到
+7 项能力之一，命中不了直接 403 + `X-Cli-Scope-Denied`。
+
+为什么不用 scope claim：claim 只能重签令牌才能改，而「页面上改一下权限、下一次请求就生效」
+要求改的是**可变的会话记录**。代价是每条 cli 请求多一次 Redis 读（与单会话检查同量级，
+且那次本来就要读同一条记录）。
+
+配套两步，缺一不可：
+1. 服务端按 `meta.scopes` 实时校验（收窄即拒、放宽即放）；
+2. 工具侧每次调用前拉 `GET /api/bbs/me/sessions` 的 `current:true` 那行，把 scopes 写回本地缓存 ——
+   否则服务端收窄了、工具还以为自己有；放宽了、工具还在本地自拒。15 秒 TTL 内不重复拉。
 
 ### 17.4 被否掉的两种做法
 

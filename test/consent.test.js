@@ -13,7 +13,7 @@ import { execFile } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { startMockForum, ACCESS_TOKEN } from './mock-forum.js';
 import {
-  SCOPES, ALL_SCOPE_IDS, parseScopeList, checkScope, scopeError, scopeSummary,
+  SCOPES, ALL_SCOPE_IDS, parseScopeList, checkScope, scopeError, scopeSummary, syncGrantedScopes,
 } from '../src/consent.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -119,4 +119,55 @@ test('CLI: scope 命令能展示当前范围', async () => {
   assert.equal(r.code, 0, r.stderr);
   assert.match(r.stdout, /授权范围: 全部|授权范围: read/);
   assert.match(r.stdout, /本次授权范围/);
+});
+
+// ── 1121：服务端收窄/放宽后，本地缓存要跟着变（否则「页面改完不用重启」只在一边成立）──
+test('syncGrantedScopes：把服务端那条 cli 授权的范围写回本地缓存', async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'nf-sync-'));
+  const prev = process.env.NARWHAL_FORUM_HOME;
+  process.env.NARWHAL_FORUM_HOME = home;
+  try {
+    fs.writeFileSync(path.join(home, 'credentials.json'), JSON.stringify({
+      baseUrl: 'http://127.0.0.1:1',
+      accessToken: ACCESS_TOKEN,
+      grantedScopes: ['read', 'write:comment'],
+    }));
+    const fake = {
+      async request(p) {
+        assert.equal(p, '/api/bbs/me/sessions');
+        return { list: [{ current: true, deviceType: 'cli', scopes: 'read' }] };
+      },
+    };
+    const got = await syncGrantedScopes(fake, { force: true });
+    assert.deepEqual(got, ['read'], '收窄后必须回报新范围');
+    const saved = JSON.parse(fs.readFileSync(path.join(home, 'credentials.json'), 'utf8'));
+    assert.deepEqual(saved.grantedScopes, ['read'], '本地缓存必须被服务端覆盖');
+
+    // 放宽也是同一条路
+    fake.request = async () => ({ list: [{ current: true, deviceType: 'cli', scopes: 'read,write:comment,write:post' }] });
+    const widened = await syncGrantedScopes(fake, { force: true });
+    assert.deepEqual(widened, ['read', 'write:comment', 'write:post']);
+  } finally {
+    if (prev === undefined) delete process.env.NARWHAL_FORUM_HOME;
+    else process.env.NARWHAL_FORUM_HOME = prev;
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('syncGrantedScopes：不是 cli 会话（真人设备/密码登录）时不动本地凭据', async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'nf-sync2-'));
+  const prev = process.env.NARWHAL_FORUM_HOME;
+  process.env.NARWHAL_FORUM_HOME = home;
+  try {
+    const before = { baseUrl: 'http://127.0.0.1:1', accessToken: ACCESS_TOKEN, grantedScopes: ['read', 'write:post'] };
+    fs.writeFileSync(path.join(home, 'credentials.json'), JSON.stringify(before));
+    const fake = { async request() { return { list: [{ current: true, deviceType: 'pc', scopes: '' }] }; } };
+    assert.equal(await syncGrantedScopes(fake, { force: true }), null);
+    const saved = JSON.parse(fs.readFileSync(path.join(home, 'credentials.json'), 'utf8'));
+    assert.deepEqual(saved.grantedScopes, ['read', 'write:post'], 'pc 会话不该被写 scopes');
+  } finally {
+    if (prev === undefined) delete process.env.NARWHAL_FORUM_HOME;
+    else process.env.NARWHAL_FORUM_HOME = prev;
+    fs.rmSync(home, { recursive: true, force: true });
+  }
 });

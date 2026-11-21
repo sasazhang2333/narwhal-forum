@@ -10,7 +10,7 @@
 import readline from 'node:readline';
 import { TOOL_MAP, toolList } from './tools.js';
 import { ForumClient } from '../client.js';
-import { checkScope, scopeError, SCOPE_FREE_TOOLS } from '../consent.js';
+import { checkScope, scopeError, syncGrantedScopes, SCOPE_FREE_TOOLS } from '../consent.js';
 
 import { readFileSync } from 'node:fs';
 
@@ -109,7 +109,9 @@ export class ForumMcpServer {
           this.log('tools/call', name);
           try {
             // 授权范围闸：登录时人只给了一部分范围，就别让 Agent 越界。
+            // 先跟服务端对一次账：页面收窄/放宽后，下一次调用就按新范围走（不重启、不重登录）。
             if (!SCOPE_FREE_TOOLS.has(name)) {
+              await syncGrantedScopes(this.client);
               const info = checkScope(name);
               if (!info.ok) throw scopeError(name, info);
             }

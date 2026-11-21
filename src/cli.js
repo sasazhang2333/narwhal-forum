@@ -179,12 +179,14 @@ async function runTool(command, flags, positionals) {
     args[argName] = value;
   }
   const tool = TOOL_MAP.get(spec.tool);
-  const { checkScope, scopeError, SCOPE_FREE_TOOLS } = await import('./consent.js');
+  const { checkScope, scopeError, syncGrantedScopes, SCOPE_FREE_TOOLS } = await import('./consent.js');
+  const client = clientFrom(flags);
   if (!SCOPE_FREE_TOOLS.has(spec.tool)) {
+    // 与服务端对账一次：页面改完的能力下一次命令就生效
+    await syncGrantedScopes(client, { force: true });
     const info = checkScope(spec.tool);
     if (!info.ok) throw scopeError(spec.tool, info);
   }
-  const client = clientFrom(flags);
   const out = await tool.handler({ client }, args);
   if (flags.json) {
     process.stdout.write(JSON.stringify(out.data === undefined ? { text: out.text } : out.data, null, 2) + '\n');
