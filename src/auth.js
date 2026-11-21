@@ -428,7 +428,10 @@ export async function deviceLogin(opts = {}) {
   if (!baseUrl) throw new Error('deviceLogin 需要 baseUrl');
   const log = opts.log || (() => {});
   const clientName = opts.clientName || 'narwhal-forum';
-  const scopes = Array.isArray(opts.scopes) ? opts.scopes : ['all'];
+  // 'all' 只是个本地写法：不把字面量发给后端，让后端用它自己的能力全集（服务端是唯一清单）
+  const scopes = (Array.isArray(opts.scopes) ? opts.scopes : [])
+    .map((x) => String(x || '').trim())
+    .filter((x) => x && x !== 'all' && x !== '*');
   const timeoutMs = opts.timeoutMs ?? 300000;
   const intervalMs = opts.intervalMs ?? 2000;
   const openBrowser = opts.openBrowser !== false;
@@ -439,7 +442,7 @@ export async function deviceLogin(opts = {}) {
   const createRes = await fetch(baseUrl + '/api/cli/device/code', {
     method: 'POST',
     headers,
-    body: JSON.stringify({ clientName, scopes }),
+    body: JSON.stringify(scopes.length ? { clientName, scopes } : { clientName }),
     signal: AbortSignal.timeout(15000),
   });
   const createBody = await createRes.json().catch(() => null);
@@ -493,7 +496,7 @@ export async function deviceLogin(opts = {}) {
         refreshToken: payload.refreshToken,
         username: payload.username,
         userId: payload.userId,
-        scopes: payload.scopes || scopes,
+        scopes: payload.scopes || created.scopes || scopes,
         clientName: payload.clientName || clientName,
         authMode: 'device',
       };
