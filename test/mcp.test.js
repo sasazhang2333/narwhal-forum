@@ -249,14 +249,18 @@ test('tools/call create_post：待审时不说「已发布」（实测新账号�
 
 /* ------------------------------------------- 审核 / 删除（本轮新增的三件工具） */
 
-test('tools/call approve_post：把待审帖批准为公开', async () => {
+test('tools/call approve_post：工具侧直接拒绝（审批只能人做 R1124）', async () => {
   const before = await stdio.tool('list_posts', { page: 1, pageSize: 20 });
   const pendingId = '900000000000000001';
   assert.ok(!before.text.includes(pendingId), '待审帖不该出现在列表里');
   const { text, isError, structured } = await stdio.tool('approve_post', { postId: pendingId });
-  assert.equal(isError, false, text);
-  assert.match(text, /已批准帖子/);
-  assert.equal(structured.status, 1);
+  // 1124: 审批不是「能力」而是「人的动作」—— 工具侧一律拒绝，服务端也会 403。
+  assert.equal(isError, true, text);
+  assert.match(text, /只能由人在网页里完成/);
+  assert.equal(structured.error?.code, 'E_HUMAN_ONLY_APPROVAL');
+  // 帖子仍是待审：没被这条工具放出去
+  const after = await stdio.tool('list_posts', { page: 1, pageSize: 20 });
+  assert.ok(!after.text.includes(pendingId), '待审帖不该因为工具调用而公开');
 });
 
 test('tools/call delete_comment：没有 confirm=true 时拒绝执行', async () => {

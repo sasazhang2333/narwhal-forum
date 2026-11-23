@@ -35,7 +35,7 @@ const HELP = [
   '  logout                 撤销授权：后端登出 + 删除本地凭据 + 删除插件浏览器 profile',
   '  auth status            查看授权状态（是否登录、授权方式、浏览器 profile 位置）',
   '  risk                   授权前必读的风险提示（每次 login/setup 也会先打印）',
-  '  scope [set ...]        查看/修改授权范围（read, write:comment, write:post, moderate, delete, draft）',
+  '  scope [set ...]        查看/修改授权范围（read, write:comment, write:post, delete, draft）',
   '  token set|show|clear   直接管理 token（适合从浏览器复制 access_token）',
   '  whoami                 当前登录用户信息',
   '',

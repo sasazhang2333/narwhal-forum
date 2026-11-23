@@ -31,7 +31,8 @@ const SCOPE_TITLES = {
   'read:own': '读取我的数据',
   'write:comment': '评论与互动',
   'write:post': '发帖',
-  moderate: '审核',
+  // 1124：审核不再是能力项（审批只能人做）；保留映射只为让历史授权里的旧值还能显示成人话。
+  moderate: '审核（已停用，审批只能人做）',
   delete: '删除',
   draft: '人审草稿',
 };

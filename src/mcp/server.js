@@ -140,10 +140,13 @@ export class ForumMcpServer {
             }
             const text = lines.join('\n');
             const extra = '';
+            // 失败也给结构化错误：客户端不该靠正则去扒中文。blockers 只在真有门禁待办时带上。
+            const errorPayload = { name: err && err.name, message: err && err.message, code: err && err.code };
+            if (blocked) errorPayload.blockers = blocked;
             return ok(id, {
               content: [{ type: 'text', text: clip(text + extra) }],
               isError: true,
-              ...(blocked ? { structuredContent: { error: { name: err.name, message: err.message, code: err.code, blockers: blocked } } } : {}),
+              structuredContent: { error: errorPayload },
               _meta: { errorName: err && err.name, code: err && err.code },
             });
           }

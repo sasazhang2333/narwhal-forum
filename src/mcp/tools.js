@@ -207,7 +207,7 @@ export const TOOLS = [
       password: S.str('mode=password 时的密码（不落盘，可用环境变量 NARWHAL_FORUM_PASSWORD 代替）'),
       captchaToken: S.str('若后端开启了图形验证码，可传入已获得的校验票据'),
       acknowledgeRisks: S.bool('是否已把风险提示展示给用户并取得明确同意（默认 false：不打开浏览器，只返回风险全文）', { default: false }),
-      scopes: S.str('授权范围（默认 all）：all / read / read:own / write:comment / write:post / moderate / delete / draft，可逗号组合', { default: 'all' }),
+      scopes: S.str('授权范围（默认 all）：all / read / read:own / write:comment / write:post / delete / draft，可逗号组合', { default: 'all' }),
     }),
     async handler(ctx, args) {
       const mode = args.mode || 'browser';

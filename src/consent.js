@@ -37,11 +37,6 @@ export const SCOPES = [
     detail: '新建帖子（新账号/未达信任阈值会进待审，不会直接公开）',
   },
   {
-    id: 'moderate',
-    title: '审核',
-    detail: '批准待审帖子（后端仍会校验版主/管理员权限）',
-  },
-  {
     id: 'delete',
     title: '删除',
     detail: '删除自己的帖子或评论（不可撤销；后端会校验作者身份）',
@@ -69,7 +64,6 @@ export const TOOL_SCOPES = {
   create_comment: 'write:comment',
   react_post: 'write:comment',
   create_post: 'write:post',
-  approve_post: 'moderate',
   delete_comment: 'delete',
   delete_post: 'delete',
   draft_create: 'draft',
@@ -120,7 +114,24 @@ export function readGrant(creds) {
  * 查某个工具在当前授权下能不能用。
  * 旧凭据（没有 grantedScopes）按全量放行并标记 legacy —— 升级路径不该让老用户突然不能发帖。
  */
+/** 1124：审批类动作永远只能人做 —— 工具最多「发布已由人审批通过的内容」。 */
+export const HUMAN_ONLY_TOOLS = new Set(['approve_post']);
+
+/** 人审专属工具的统一拒绝对象。 */
+export function humanOnlyError(toolName) {
+  const err = new Error(
+    '「' + toolName + '」这类审批动作只能由人在网页里完成：' +
+    'AI 工具最多发布已由人审批通过的内容，不能自己批准。'
+  );
+  err.code = 'E_HUMAN_ONLY_APPROVAL';
+  err.hint = '要批准待审帖，请在网页后台的待审列表里由人操作（工具侧没有这个能力，勾了也没用）。';
+  return err;
+}
+
 export function checkScope(toolName, creds) {
+  if (HUMAN_ONLY_TOOLS.has(toolName)) {
+    return { ok: false, need: 'human-only', grant: readGrant(creds) };
+  }
   const need = TOOL_SCOPES[toolName];
   if (!need) return { ok: true, need: null, grant: readGrant(creds) };
   const grant = readGrant(creds);
@@ -133,6 +144,7 @@ export function checkScope(toolName, creds) {
 
 /** 越界时的错误对象：带上「怎么扩权」，别只甩一句没权限。 */
 export function scopeError(toolName, info) {
+  if (info.need === 'human-only') return humanOnlyError(toolName);
   const scope = SCOPES.find((s) => s.id === info.need);
   const granted = info.grant ? info.grant.scopes.join(', ') : '（未记录）';
   const err = new Error(
