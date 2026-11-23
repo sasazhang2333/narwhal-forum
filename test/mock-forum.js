@@ -450,6 +450,7 @@ export async function startMockForum(options = {}) {
         if (!authed(req)) return unauth();
         if (state.gateComment) return send(200, gated(state.gateComment, '才能评论'));
         const payload = JSON.parse(body || '{}');
+        state.lastCommentDraftCode = payload.draftCode || null; // 1124: 供测试断言「人审凭据随 create 走」
         const content = String(payload.content || '').trim();
         if (!content) return send(200, failure('评论内容不能为空'));
         if (content.length > 2000) return send(200, failure('评论内容过长'));

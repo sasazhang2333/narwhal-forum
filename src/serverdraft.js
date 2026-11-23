@@ -78,6 +78,8 @@ export async function publishServerDraft(client, code) {
   let kind = draft.kind;
   if (kind === 'comment') {
     created = unwrap(await client.createComment({
+      // 1124: 人审凭据随 create 一起走，服务端核验通过就不再进待审（一次性、hash 绑定）。
+      draftCode: code,
       postId: payload.postId,
       content,
       parentId: payload.parentId,
@@ -86,6 +88,7 @@ export async function publishServerDraft(client, code) {
     }));
   } else {
     created = unwrap(await client.createPost({
+      draftCode: code,
       title: payload.title,
       content,
       categoryId: payload.categoryId,

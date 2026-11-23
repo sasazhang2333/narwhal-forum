@@ -331,6 +331,10 @@ narwhal-forum draft publish DR-1A2B3C4D           # 人批过之后，工具才�
 - 带图草稿会先把图片上传换成 URL 再提交（图片本来就要上传才能显示）；
 - 服务端拦住的是「没人点批准」，**拦不住「同一个账号自己批自己」** —— 站点只能留痕（`reviewer_id` / `approved_at` / `payload_hash`）供事后核对；
 - MCP 侧对应 `draft_create(mode="server")` → 回 `draftCode` + `reviewUrl`，`draft_publish(draftCode="DR-…")` 发布。
+- 1124 起：`draft publish` 会把 `draftCode` 一起发给 create 接口，服务端核验
+  「同作者 + 同 kind + 内容逐字相同 + 凭据只用一次」通过后**直接公开、不再二次待审**；
+  用 `--content` 手工重发（不带 `draftCode`）或内容被改过，仍按常规流程进待审。
+- 同一条规则的另一半：AI 工具代发的**评论**与帖子一样强制待审（判据是会话 `deviceType=cli`，不是请求头）。
 
 ### 4.4 图片评论（`--image`）
 

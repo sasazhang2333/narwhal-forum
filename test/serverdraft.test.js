@@ -90,6 +90,8 @@ test('批准之后才发得出去，且只能发一次（领取即失效）', as
   assert.equal(mock.state.comments.find((c) => c.content.includes('人工批准后发布')) !== undefined, true);
   assert.equal(mock.state.drafts.get(draft.draftCode).status, 'published');
   assert.equal(mock.state.drafts.get(draft.draftCode).resultId !== undefined, true, '发布后要回报产物 id');
+  assert.equal(mock.state.lastCommentDraftCode, draft.draftCode,
+    '1124: 发布时要把 draftCode 一起发给 create，服务端才能据此跳过待审');
 
   const again = await run(['draft', 'publish', draft.draftCode]);
   assert.notEqual(again.code, 0, '同一条批准不能发两次');

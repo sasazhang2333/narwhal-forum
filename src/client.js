@@ -552,6 +552,8 @@ export class ForumClient {
     if (content.length > 2000) throw new ForumError('评论内容超过 2000 字上限（当前 ' + content.length + ' 字）');
 
     const body = { postId, content };
+    // 1124: 人审过的草稿带上凭据 —— 服务端核验内容 hash 后跳过待审（一次性）。
+    if (opts.draftCode) body.draftCode = String(opts.draftCode);
     if (opts.parentId !== undefined && opts.parentId !== null) body.parentId = opts.parentId;
     if (opts.replyUserId !== undefined && opts.replyUserId !== null) body.replyUserId = opts.replyUserId;
     if (opts.whisper !== undefined) body.whisper = Boolean(opts.whisper);
@@ -573,6 +575,8 @@ export class ForumClient {
     if (opts.summary && String(opts.summary).length > 500) throw new ForumError('摘要超过 500 字上限');
 
     const body = { title, content, categoryId: opts.categoryId };
+    // 1124: 人审过的草稿带上凭据 —— 服务端核验内容 hash 后跳过待审（一次性）。
+    if (opts.draftCode) body.draftCode = String(opts.draftCode);
     if (opts.summary) body.summary = opts.summary;
     if (opts.type) body.type = opts.type;
     if (opts.cover) body.cover = opts.cover;
